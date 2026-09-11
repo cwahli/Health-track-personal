@@ -16,11 +16,14 @@ import {
   FileImage,
   UploadCloud,
   Loader2,
-  FolderOpen
+  FolderOpen,
+  Images
 } from 'lucide-react';
 import { LoggedMeal, DayColumn, NutrientRow } from '../types';
-import { formatDriveImageUrl, isGoogleDriveUrl, getDriveDirectViewUrl } from '../utils/driveImage';
+import { formatDriveImageUrl, isGoogleDriveUrl, getDriveDirectViewUrl, getMealPhotos, MealPhotoItem } from '../utils/driveImage';
+import { formatMealTimeAgo } from '../utils/timeAgo';
 import { DriveFolderModal } from './DriveFolderModal';
+import { PhotoBrowserLightbox } from './PhotoBrowserLightbox';
 import { GOOGLE_DRIVE_FOLDER_URL, GOOGLE_DRIVE_FOLDER_ID, DriveFolderFile } from '../data/googleDriveFolderData';
 import { uploadImageToGoogleDrive } from '../utils/driveUploader';
 import { googleSignIn, getAccessToken } from '../utils/googleAuth';
@@ -35,6 +38,11 @@ interface DailyMealViewProps {
   clinicalDiagnoses?: Record<string, { overall: string; highlights: string[]; flags: string[]; raw: string }>;
 
   onUpdateMealPhoto?: (id: string, imageUrl: string, driveFileName?: string) => void;
+  onSetMealTopPhoto?: (
+    meal: LoggedMeal,
+    selectedPhoto: MealPhotoItem,
+    newOrderedPhotos: MealPhotoItem[]
+  ) => Promise<boolean | void> | boolean | void;
 }
 
 export const DailyMealView: React.FC<DailyMealViewProps> = ({
@@ -46,13 +54,14 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
   clinicalDiagnoses,
 
   onUpdateMealPhoto,
+  onSetMealTopPhoto,
 }) => {
   const currentDayCol = columns.find(c => c.key === selectedDayKey) || columns[1] || columns[0];
   const dayMeals = meals.filter(m => m.dayKey === selectedDayKey);
   const diagnosis = clinicalDiagnoses?.[selectedDayKey];
 
-  // Image Lightbox State
-  const [previewImage, setPreviewImage] = useState<{ url: string; title: string; driveUrl?: string; fileName?: string } | null>(null);
+  // Image Lightbox State (supports multiple photos & browsing)
+  const [activeLightbox, setActiveLightbox] = useState<{ photos: MealPhotoItem[]; initialIndex: number; meal?: LoggedMeal } | null>(null);
 
   // Photo Attach Modal & Google Drive Folder State
   const [attachPhotoTarget, setAttachPhotoTarget] = useState<LoggedMeal | null>(null);
@@ -389,10 +398,11 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
         ) : (
           <div className="space-y-3">
             {dayMeals.map((meal, index) => {
-              const formattedImg = formatDriveImageUrl(meal.imageUrl || meal.driveFileName, meal.mealId);
-              const hasActualImage = !!formattedImg;
-              const directDriveLink = getDriveDirectViewUrl(meal.imageUrl || meal.driveFileName, meal.mealId) || (meal.driveFileId ? `https://drive.google.com/file/d/${meal.driveFileId}/view` : undefined);
-              const displayDriveName = meal.driveFileName || `${meal.foodName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`;
+              const mealPhotos = getMealPhotos(meal);
+              const hasActualImage = mealPhotos.length > 0;
+              const primaryPhoto = mealPhotos[0];
+              const directDriveLink = primaryPhoto?.driveUrl || getDriveDirectViewUrl(meal.imageUrl || meal.driveFileName, meal.mealId) || (meal.driveFileId ? `https://drive.google.com/file/d/${meal.driveFileId}/view` : undefined);
+              const displayDriveName = primaryPhoto?.fileName || meal.driveFileName || `${meal.foodName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`;
 
               return (
                 <div 
@@ -405,12 +415,12 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
                       {/* Image Thumbnail or Drive Attachment Icon */}
                       {hasActualImage ? (
                         <div 
-                          onClick={() => setPreviewImage({ url: formattedImg!, title: meal.foodName, driveUrl: directDriveLink, fileName: displayDriveName })}
+                          onClick={() => setActiveLightbox({ photos: mealPhotos, initialIndex: 0, meal })}
                           className="relative w-16 h-16 sm:w-20 sm:h-20 rounded-xl overflow-hidden bg-slate-950 border border-slate-800 shrink-0 group/thumb cursor-zoom-in"
-                          title="Click to expand full photo"
+                          title={mealPhotos.length > 1 ? `Click to browse all ${mealPhotos.length} photos` : "Click to expand full photo"}
                         >
                           <img
-                            src={formattedImg!}
+                            src={primaryPhoto.url}
                             alt={meal.foodName}
                             loading="lazy"
                             referrerPolicy="no-referrer"
@@ -435,53 +445,14 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
                       )}
 
                       <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {meal.mealId && (
-                            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
-                              {meal.mealId}
-                            </span>
-                          )}
-                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                            {meal.mealType}
-                          </span>
-                          <span className="text-xs text-slate-400 flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            {meal.time}
-                          </span>
-                          
-                          {/* Google Drive Smart Chip */}
-                          <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/30 text-[10px] text-emerald-300 font-mono">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                            <span className="truncate max-w-[130px]">{displayDriveName}</span>
-                          </div>
-
-                          <button
-                            onClick={() => setAttachPhotoTarget(meal)}
-                            className="text-[10px] font-semibold text-slate-300 hover:text-white flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 cursor-pointer"
-                          >
-                            <UploadCloud className="w-3 h-3 text-teal-400" />
-                            <span>{hasActualImage ? 'Replace Photo' : 'Upload Photo'}</span>
-                          </button>
-
-                          {directDriveLink && (
-                            <a
-                              href={directDriveLink}
-                              target="_blank"
-                              rel="noreferrer noopener"
-                              className="text-[10px] font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700"
-                            >
-                              <ExternalLink className="w-2.5 h-2.5" />
-                              <span>Drive File</span>
-                            </a>
-                          )}
-                        </div>
-                        
-                        <h4 className="text-sm font-bold text-white mt-1">
+                        <h4 className="text-base font-bold text-white leading-snug">
                           {meal.foodName}
                         </h4>
-                        <p className="text-xs text-slate-400">
-                          {meal.portion}
-                        </p>
+                        {meal.portion && (
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {meal.portion.replace(/^Portion:\s*/i, '')}
+                          </p>
+                        )}
                       </div>
                     </div>
 
@@ -494,8 +465,8 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
 
                   </div>
 
-                  {/* Micro Nutrients Grid */}
-                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 bg-slate-950/70 p-2.5 rounded-xl border border-slate-800/80 text-center text-xs">
+                  {/* Micro Nutrients Grid - Unboxed directly in card */}
+                  <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center text-xs">
                     <div>
                       <span className="text-[10px] text-slate-400 block">Protein</span>
                       <span className="font-semibold text-slate-200">{meal.protein}g</span>
@@ -526,30 +497,71 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Clinical Meal Diagnosis from Google Sheet */}
+                  {/* Clinical Meal Diagnosis from Google Sheet - Unboxed */}
                   {meal.clinicalNote && (
-                    <div className="text-xs text-slate-300 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80 flex items-start gap-2">
+                    <div className="text-xs text-slate-300 flex items-start gap-2">
                       <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
                       <div>
                         <span className="text-[10px] font-bold uppercase text-emerald-400 block tracking-wider">Sheet Meal Diagnosis</span>
-                        <p className="mt-0.5 leading-relaxed">{meal.clinicalNote}</p>
+                        <p className="mt-0.5 leading-relaxed text-slate-300">{meal.clinicalNote}</p>
                       </div>
                     </div>
                   )}
 
-                  {/* Meal Flags */}
-                  {meal.flags && meal.flags.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {meal.flags.map((flag, idx) => (
-                        <span 
-                          key={idx}
-                          className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-slate-300"
-                        >
-                          {flag}
+                  {/* Card Footer: Meal ID, Combined Date/Time, Drive Chips & Flags */}
+                  <div className="pt-2 border-t border-slate-800/60 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {meal.mealId && (
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+                          {meal.mealId}
                         </span>
-                      ))}
+                      )}
+                      <span className="text-xs font-medium text-slate-400 flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-slate-500" />
+                        {formatMealTimeAgo(meal.dateStr, meal.time, meal.timestamp)}
+                      </span>
+
+                      {/* Google Drive Smart Chip */}
+                      <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-500/30 text-[10px] text-emerald-300 font-mono">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                        <span className="truncate max-w-[130px]">{displayDriveName}</span>
+                      </div>
+
+                      <button
+                        onClick={() => setAttachPhotoTarget(meal)}
+                        className="text-[10px] font-semibold text-slate-300 hover:text-white flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 cursor-pointer"
+                      >
+                        <UploadCloud className="w-3 h-3 text-teal-400" />
+                        <span>{hasActualImage ? 'Replace Photo' : 'Upload Photo'}</span>
+                      </button>
+
+                      {directDriveLink && (
+                        <a
+                          href={directDriveLink}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="text-[10px] font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700"
+                        >
+                          <ExternalLink className="w-2.5 h-2.5" />
+                          <span>Drive File</span>
+                        </a>
+                      )}
                     </div>
-                  )}
+
+                    {/* Meal Flags */}
+                    {meal.flags && meal.flags.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {meal.flags.map((flag, idx) => (
+                          <span 
+                            key={idx}
+                            className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-slate-800 border border-slate-700 text-slate-300"
+                          >
+                            {flag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
 
                 </div>
               );
@@ -769,54 +781,20 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
         </div>
       )}
 
-      {/* Full Resolution Image Lightbox */}
-      {previewImage && (
-        <div 
-          onClick={() => setPreviewImage(null)}
-          className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 cursor-zoom-out"
-        >
-          <div 
-            onClick={(e) => e.stopPropagation()}
-            className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full p-4 space-y-3 shadow-2xl animate-fade-in"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-bold text-white font-heading">{previewImage.title}</h4>
-                {previewImage.fileName && (
-                  <p className="text-xs text-emerald-400 font-mono">Drive File: {previewImage.fileName}</p>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {previewImage.driveUrl && (
-                  <a
-                    href={previewImage.driveUrl}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-emerald-400 border border-slate-700"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Open in Google Drive</span>
-                  </a>
-                )}
-                <button
-                  onClick={() => setPreviewImage(null)}
-                  className="text-slate-400 hover:text-white text-sm p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            <div className="relative rounded-xl overflow-hidden bg-slate-950 flex items-center justify-center max-h-[70vh]">
-              <img
-                src={previewImage.url}
-                alt={previewImage.title}
-                referrerPolicy="no-referrer"
-                className="max-h-[70vh] w-auto object-contain rounded-xl"
-              />
-            </div>
-          </div>
-        </div>
+      {/* Full Resolution Multi-Photo Lightbox & Browser */}
+      {activeLightbox && (
+        <PhotoBrowserLightbox
+          photos={activeLightbox.photos}
+          initialIndex={activeLightbox.initialIndex}
+          mealId={activeLightbox.meal?.mealId || activeLightbox.meal?.id}
+          onSetTopPhoto={
+            activeLightbox.meal && onSetMealTopPhoto
+              ? (selectedPhoto, newOrderedPhotos) =>
+                  onSetMealTopPhoto(activeLightbox.meal!, selectedPhoto, newOrderedPhotos)
+              : undefined
+          }
+          onClose={() => setActiveLightbox(null)}
+        />
       )}
 
       {/* Google Drive Photo Gallery Modal */}

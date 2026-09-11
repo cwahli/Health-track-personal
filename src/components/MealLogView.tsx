@@ -27,11 +27,14 @@ import {
   Paperclip,
   Loader2,
   Check,
-  FolderOpen
+  FolderOpen,
+  Images
 } from 'lucide-react';
 import { LoggedMeal, DayColumn, MealLogRow } from '../types';
-import { formatDriveImageUrl, isGoogleDriveUrl, getDriveDirectViewUrl } from '../utils/driveImage';
+import { formatDriveImageUrl, isGoogleDriveUrl, getDriveDirectViewUrl, getMealPhotos, MealPhotoItem } from '../utils/driveImage';
+import { formatMealTimeAgo } from '../utils/timeAgo';
 import { DriveFolderModal } from './DriveFolderModal';
+import { PhotoBrowserLightbox } from './PhotoBrowserLightbox';
 import { GOOGLE_DRIVE_FOLDER_URL, GOOGLE_DRIVE_FOLDER_ID, DriveFolderFile } from '../data/googleDriveFolderData';
 import { uploadImageToGoogleDrive } from '../utils/driveUploader';
 import { googleSignIn, getAccessToken } from '../utils/googleAuth';
@@ -47,6 +50,11 @@ interface MealLogViewProps {
   onOpenMealSimulator?: () => void;
   onResetDefaultMeals?: () => void;
   onUpdateMealPhoto?: (id: string, imageUrl: string, driveFileName?: string) => void;
+  onSetMealTopPhoto?: (
+    meal: LoggedMeal,
+    selectedPhoto: MealPhotoItem,
+    newOrderedPhotos: MealPhotoItem[]
+  ) => Promise<boolean | void> | boolean | void;
 }
 
 export const MealLogView: React.FC<MealLogViewProps> = ({
@@ -59,14 +67,15 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   onOpenMealSimulator,
   onResetDefaultMeals,
   onUpdateMealPhoto,
+  onSetMealTopPhoto,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDayFilter, setSelectedDayFilter] = useState<string>('all');
   const [selectedTypeFilter, setSelectedTypeFilter] = useState<string>('all');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   
-  // Image Lightbox State
-  const [previewImage, setPreviewImage] = useState<{ url: string; title: string; driveUrl?: string; fileName?: string } | null>(null);
+  // Image Lightbox State (supports multiple photos & browsing)
+  const [activeLightbox, setActiveLightbox] = useState<{ photos: MealPhotoItem[]; initialIndex: number; meal?: LoggedMeal } | null>(null);
 
   // Photo Attach / Link Modal State
   const [attachPhotoTarget, setAttachPhotoTarget] = useState<LoggedMeal | null>(null);
@@ -458,10 +467,11 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {filteredMeals.map((meal, idx) => {
-            const formattedImg = formatDriveImageUrl(meal.imageUrl || meal.driveFileName, meal.mealId);
-            const hasActualImage = !!formattedImg;
-            const directDriveLink = getDriveDirectViewUrl(meal.imageUrl || meal.driveFileName, meal.mealId) || (meal.driveFileId ? `https://drive.google.com/file/d/${meal.driveFileId}/view` : undefined);
-            const displayDriveName = meal.driveFileName || `${meal.foodName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`;
+            const mealPhotos = getMealPhotos(meal);
+            const hasActualImage = mealPhotos.length > 0;
+            const primaryPhoto = mealPhotos[0];
+            const directDriveLink = primaryPhoto?.driveUrl || getDriveDirectViewUrl(meal.imageUrl || meal.driveFileName, meal.mealId) || (meal.driveFileId ? `https://drive.google.com/file/d/${meal.driveFileId}/view` : undefined);
+            const displayDriveName = primaryPhoto?.fileName || meal.driveFileName || `${meal.foodName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`;
 
             return (
               <div
@@ -472,38 +482,15 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                   
                   {/* Top Meal Header */}
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {meal.mealId && (
-                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
-                            {meal.mealId}
-                          </span>
-                        )}
-                        <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full ${
-                          meal.mealType === 'Breakfast' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' :
-                          meal.mealType === 'Lunch' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
-                          meal.mealType === 'Dinner' ? 'bg-indigo-500/10 text-indigo-400 border border-indigo-500/20' :
-                          meal.mealType === 'Late Night' ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' :
-                          'bg-teal-500/10 text-teal-400 border border-teal-500/20'
-                        }`}>
-                          {meal.mealType}
-                        </span>
-                        <span className="text-xs font-semibold text-slate-400 flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          {meal.dateStr}
-                        </span>
-                        <span className="text-xs text-slate-500 flex items-center gap-1">
-                          <Clock className="w-3 h-3" />
-                          {meal.time}
-                        </span>
-                      </div>
-
-                      <h3 className="text-sm font-bold text-white mt-1.5 leading-snug">
+                    <div className="space-y-0.5">
+                      <h3 className="text-base font-bold text-white leading-snug">
                         {meal.foodName}
                       </h3>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        Portion: {meal.portion}
-                      </p>
+                      {meal.portion && (
+                        <p className="text-xs text-slate-400">
+                          {meal.portion}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
@@ -517,17 +504,20 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                   {/* Meal Photo: Clean preview where clicking automatically opens it */}
                   {hasActualImage ? (
                     <div
-                      onClick={() => setPreviewImage({ url: formattedImg!, title: meal.foodName, driveUrl: directDriveLink, fileName: displayDriveName })}
+                      onClick={() => setActiveLightbox({ photos: mealPhotos, initialIndex: 0, meal })}
                       className="mt-3 relative rounded-xl overflow-hidden bg-slate-950 border border-slate-800 aspect-video sm:aspect-[21/9] group/img cursor-pointer hover:border-slate-700 transition"
-                      title="Click to view full photo"
+                      title={mealPhotos.length > 1 ? `Click to browse all ${mealPhotos.length} photos` : "Click to view full photo"}
                     >
                       <img
-                        src={formattedImg!}
+                        src={primaryPhoto.url}
                         alt={meal.foodName}
                         loading="lazy"
                         referrerPolicy="no-referrer"
                         className="w-full h-full object-cover group-hover/img:scale-105 transition-transform duration-300"
                       />
+                      <div className="absolute inset-0 bg-slate-950/30 opacity-0 group-hover/img:opacity-100 flex items-center justify-center transition">
+                        <Maximize2 className="w-5 h-5 text-white" />
+                      </div>
                     </div>
                   ) : (
                     /* Google Drive Smart Chip File Card (No generic pictures) */
@@ -572,8 +562,8 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                     </div>
                   )}
 
-                  {/* Nutrition Badges Grid */}
-                  <div className="mt-3.5 grid grid-cols-4 sm:grid-cols-7 gap-1.5 text-center bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80 text-[11px]">
+                  {/* Nutrition Badges Grid - Unboxed directly in card */}
+                  <div className="mt-3.5 grid grid-cols-4 sm:grid-cols-7 gap-1.5 text-center text-[11px]">
                     <div>
                       <span className="text-[9px] uppercase text-slate-500 block">Protein</span>
                       <span className="font-semibold text-slate-200">{meal.protein}g</span>
@@ -610,22 +600,31 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Meal Diagnosis from Google Sheet */}
+                  {/* Meal Diagnosis from Google Sheet - Clean unboxed text */}
                   {meal.clinicalNote && (
-                    <div className="mt-3 text-xs text-slate-300 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80 flex items-start gap-2">
+                    <div className="mt-3 text-xs text-slate-300 flex items-start gap-2">
                       <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
                       <div>
                         <span className="text-[10px] font-bold uppercase text-emerald-400 block tracking-wider">Sheet Meal Diagnosis</span>
-                        <p className="mt-0.5 leading-relaxed">{meal.clinicalNote}</p>
+                        <p className="mt-0.5 leading-relaxed text-slate-300">{meal.clinicalNote}</p>
                       </div>
                     </div>
                   )}
 
                 </div>
 
-                {/* Card Footer: Badges & Lower-down Bin button */}
-                <div className="mt-2 pt-2 border-t border-slate-800/60 flex items-center justify-between gap-2">
-                  <div className="flex flex-wrap gap-1.5">
+                {/* Card Footer: Meal ID, Combined Date/Time Ago, Badges & Action Buttons */}
+                <div className="mt-3 pt-2.5 border-t border-slate-800/60 flex items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {meal.mealId && (
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-slate-700">
+                        {meal.mealId}
+                      </span>
+                    )}
+                    <span className="text-xs font-medium text-slate-400 flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-slate-500" />
+                      {formatMealTimeAgo(meal.dateStr, meal.time, meal.timestamp)}
+                    </span>
                     {meal.flags && meal.flags.length > 0 && meal.flags.map((flag, idx) => (
                       <span
                         key={idx}
@@ -893,54 +892,20 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
       )}
 
 
-      {/* Full Resolution Image Lightbox */}
-      {previewImage && (
-        <div 
-          onClick={() => setPreviewImage(null)}
-          className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 cursor-zoom-out"
-        >
-          <div 
-            onClick={(e) => e.stopPropagation()}
-            className="bg-slate-900 border border-slate-800 rounded-2xl max-w-3xl w-full p-4 space-y-3 shadow-2xl animate-fade-in"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-bold text-white font-heading">{previewImage.title}</h4>
-                {previewImage.fileName && (
-                  <p className="text-xs text-emerald-400 font-mono">Drive File: {previewImage.fileName}</p>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {previewImage.driveUrl && (
-                  <a
-                    href={previewImage.driveUrl}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-emerald-400 border border-slate-700"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Open in Google Drive</span>
-                  </a>
-                )}
-                <button
-                  onClick={() => setPreviewImage(null)}
-                  className="text-slate-400 hover:text-white text-sm p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            <div className="relative rounded-xl overflow-hidden bg-slate-950 flex items-center justify-center max-h-[70vh]">
-              <img
-                src={previewImage.url}
-                alt={previewImage.title}
-                referrerPolicy="no-referrer"
-                className="max-h-[70vh] w-auto object-contain rounded-xl"
-              />
-            </div>
-          </div>
-        </div>
+      {/* Full Resolution Multi-Photo Lightbox & Browser */}
+      {activeLightbox && (
+        <PhotoBrowserLightbox
+          photos={activeLightbox.photos}
+          initialIndex={activeLightbox.initialIndex}
+          mealId={activeLightbox.meal?.mealId || activeLightbox.meal?.id}
+          onSetTopPhoto={
+            activeLightbox.meal && onSetMealTopPhoto
+              ? (selectedPhoto, newOrderedPhotos) =>
+                  onSetMealTopPhoto(activeLightbox.meal!, selectedPhoto, newOrderedPhotos)
+              : undefined
+          }
+          onClose={() => setActiveLightbox(null)}
+        />
       )}
 
       {/* Google Drive Photo Gallery Modal */}

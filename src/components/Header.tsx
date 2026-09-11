@@ -174,7 +174,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <Plus className="w-5 h-5" />
                 </button>
                 {showAddMenu && (
-                  <div className="absolute left-0 mt-2 w-48 bg-slate-800 border border-slate-700 rounded-xl shadow-xl py-2 z-[99] animate-fade-in">
+                  <div className="absolute right-0 mt-2 w-48 bg-slate-800 border border-slate-700 rounded-xl shadow-xl py-2 z-[99] animate-fade-in">
                     <button
                       onClick={() => { setShowAddMenu(false); onOpenLogMeal(); }}
                       className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200 flex items-center gap-2 cursor-pointer transition-colors"

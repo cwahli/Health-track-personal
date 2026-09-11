@@ -184,7 +184,8 @@ import { getAccessToken, isGoogleDriveAuthorized, googleSignIn } from '../utils/
 import { compressImageToTargetSize, formatBytes } from '../utils/imageCompressor';
 import { DiagnosticTracker } from '../utils/diagnosticReport';
 import { getDailyNutrientLedger } from '../utils/dashboardFoodLedger';
-import { formatDriveImageUrl } from '../utils/driveImage';
+import { formatDriveImageUrl, registerDrivePhoto, MealPhotoItem } from '../utils/driveImage';
+import { PhotoBrowserLightbox } from './PhotoBrowserLightbox';
 import exifr from 'exifr';
 
 interface FoodNutritionAgentModalProps {
@@ -318,14 +319,19 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         }
 
         const rawUrls: string[] = [];
-        if (initialEditingMeal.imageUrl) {
-          initialEditingMeal.imageUrl.split(',').forEach((u) => {
+        if (initialEditingMeal.photoUrls && initialEditingMeal.photoUrls.length > 0) {
+          rawUrls.push(...initialEditingMeal.photoUrls);
+        } else if (initialEditingMeal.imageUrl) {
+          initialEditingMeal.imageUrl.split(/[,;\n]+/).forEach((u) => {
             const t = u.trim();
             if (t) rawUrls.push(t);
           });
         }
         if (rawUrls.length === 0 && initialEditingMeal.driveFileName) {
-          rawUrls.push(initialEditingMeal.driveFileName);
+          initialEditingMeal.driveFileName.split(/[,;\n]+/).forEach((u) => {
+            const t = u.trim();
+            if (t) rawUrls.push(t);
+          });
         }
 
         const originalStaged: StagedPhotoItem[] = rawUrls.map((url, idx) => {
@@ -383,6 +389,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
 
   // Multi-image input state
   const [stagedPhotos, setStagedPhotos] = useState<StagedPhotoItem[]>([]);
+  const [lightboxPhotos, setLightboxPhotos] = useState<{ photos: MealPhotoItem[]; initialIndex: number } | null>(null);
   const [inputText, setInputText] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisStatus, setAnalysisStatus] = useState<string>('');
@@ -1260,7 +1267,17 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         uploadedDriveFileUrls = uploadResults.map((r) => r.fileId ? `https://lh3.googleusercontent.com/d/${r.fileId}=w1000` : (r.webViewLink || r.thumbnailUrl));
         uploadedDriveFileIds = uploadResults.map((r) => r.fileId);
         primaryDriveUrl = uploadedDriveFileUrls[0] || '';
-        driveFileName = uploadResults[0]?.fileName || `${activeMealId}_dish.jpg`;
+        driveFileName = uploadResults.map((r) => r.fileName).filter(Boolean).join(', ') || uploadResults[0]?.fileName || `${activeMealId}_dish.jpg`;
+
+        // Register all uploaded drive photos in runtime cache
+        uploadResults.forEach((r) => {
+          if (r.fileName && r.driveFile) {
+            registerDrivePhoto(r.fileName, { ...r.driveFile, mealId: activeMealId, name: r.fileName });
+          }
+          if (r.fileId && r.driveFile) {
+            registerDrivePhoto(r.fileId, { ...r.driveFile, mealId: activeMealId, name: r.fileName });
+          }
+        });
 
         tracker.recordPhotoUrls(uploadedDriveFileUrls);
         tracker.recordLog(`Successfully uploaded ${uploadedDriveFileUrls.length} file(s) to Google Drive`);
@@ -1385,7 +1402,13 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     }
 
     // 4. Build LoggedMeal for the local meal journal
-    const imageUrl = primaryDriveUrl || relatedUserMsg?.imageUrl || '';
+    const allPhotoUrls = (
+      uploadedDriveFileUrls.length > 0 
+        ? uploadedDriveFileUrls 
+        : (relatedUserMsg?.driveFileUrls || relatedUserMsg?.imageUrls || (primaryDriveUrl ? [primaryDriveUrl] : []))
+    ).filter(Boolean);
+
+    const imageUrl = allDriveUrlsJoined || primaryDriveUrl || relatedUserMsg?.imageUrl || '';
     const flags: string[] = [];
     if (totals.saturatedFat <= 2.0) flags.push('🟢 Low Sat Fat');
     else if (totals.saturatedFat > 6.0) flags.push('🔴 High Sat Fat');
@@ -1406,6 +1429,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
       foodName: msg.analysis.dishName,
       portion: msg.analysis.rows.map((r) => `${r.ingredient} (${r.weightG}g)`).join(', ') || 'Standard Serving',
       imageUrl: imageUrl || (initialEditingMeal?.imageUrl || ''),
+      photoUrls: allPhotoUrls.length > 0 ? allPhotoUrls : initialEditingMeal?.photoUrls,
+      driveFileIds: uploadedDriveFileIds.length > 0 ? uploadedDriveFileIds : initialEditingMeal?.driveFileIds,
       driveFileName: driveFileName || initialEditingMeal?.driveFileName,
       calories: Math.round(totals.calories),
       protein: Math.round(totals.protein * 10) / 10,
@@ -2114,25 +2139,46 @@ Google Sheet 38 Column Order:
                 {((msg.imageUrls && msg.imageUrls.length > 0) || msg.imageUrl) && (
                   <div className="mb-2 w-full">
                     <div className={`grid gap-2 ${((msg.imageUrls?.length || 1) > 1) ? 'grid-cols-2 sm:grid-cols-3' : 'grid-cols-1'}`}>
-                      {(msg.imageUrls && msg.imageUrls.length > 0 ? msg.imageUrls : [msg.imageUrl!]).map((url, imgIdx) => (
-                        <div key={imgIdx} className="relative rounded-xl overflow-hidden border border-indigo-400/40 shadow-sm bg-slate-900 group">
-                          <img
-                            src={url}
-                            alt={`Meal photo ${imgIdx + 1}`}
-                            className="w-full h-36 object-cover"
-                          />
-                          {msg.driveFileUrls && msg.driveFileUrls[imgIdx] && (
-                            <a
-                              href={msg.driveFileUrls[imgIdx]}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="absolute bottom-1 right-1 bg-black/80 hover:bg-black text-[10px] text-sky-300 px-1.5 py-0.5 rounded flex items-center gap-1 border border-slate-700"
-                            >
-                              <ExternalLink className="w-2.5 h-2.5" /> Drive
-                            </a>
-                          )}
-                        </div>
-                      ))}
+                      {(msg.imageUrls && msg.imageUrls.length > 0 ? msg.imageUrls : [msg.imageUrl!]).map((url, imgIdx) => {
+                        const allImgs = (msg.imageUrls && msg.imageUrls.length > 0 ? msg.imageUrls : [msg.imageUrl!]);
+                        const messagePhotos: MealPhotoItem[] = allImgs.map((u, i) => ({
+                          url: u,
+                          title: msg.imageFileNames?.[i] || `Meal Photo ${i + 1}`,
+                          driveUrl: msg.driveFileUrls?.[i],
+                          fileName: msg.imageFileNames?.[i] || `photo${i + 1}.jpg`,
+                        }));
+
+                        return (
+                          <div 
+                            key={imgIdx} 
+                            onClick={() => setLightboxPhotos({ photos: messagePhotos, initialIndex: imgIdx })}
+                            className="relative rounded-xl overflow-hidden border border-indigo-400/40 shadow-sm bg-slate-900 group cursor-pointer hover:border-indigo-300 transition"
+                            title={allImgs.length > 1 ? `Click to browse all ${allImgs.length} photos` : "Click to view full photo"}
+                          >
+                            <img
+                              src={url}
+                              alt={`Meal photo ${imgIdx + 1}`}
+                              className="w-full h-36 object-cover group-hover:scale-105 transition duration-200"
+                            />
+                            {allImgs.length > 1 && (
+                              <span className="absolute top-1 left-1 px-1.5 py-0.5 rounded bg-slate-950/85 text-[9px] font-mono font-bold text-indigo-300 border border-indigo-500/40">
+                                {imgIdx + 1} / {allImgs.length}
+                              </span>
+                            )}
+                            {msg.driveFileUrls && msg.driveFileUrls[imgIdx] && (
+                              <a
+                                href={msg.driveFileUrls[imgIdx]}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="absolute bottom-1 right-1 bg-black/80 hover:bg-black text-[10px] text-sky-300 px-1.5 py-0.5 rounded flex items-center gap-1 border border-slate-700"
+                              >
+                                <ExternalLink className="w-2.5 h-2.5" /> Drive
+                              </a>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                     {msg.imageSizeFormatted && (
                       <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-indigo-200">
@@ -3205,6 +3251,14 @@ Google Sheet 38 Column Order:
               </div>
             </div>
           </div>
+        )}
+        {/* Full Resolution Multi-Photo Lightbox & Browser */}
+        {lightboxPhotos && (
+          <PhotoBrowserLightbox
+            photos={lightboxPhotos.photos}
+            initialIndex={lightboxPhotos.initialIndex}
+            onClose={() => setLightboxPhotos(null)}
+          />
         )}
       </div>
   );

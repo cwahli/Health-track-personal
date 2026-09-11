@@ -605,10 +605,30 @@ export function buildMealsFromSheetRows(rows: MealLogRow[]): LoggedMeal[] {
     meal.fiber += row.fiber || 0;
     meal.potassium = (meal.potassium || 0) + (row.potassium || 0);
 
-    if (!meal.imageUrl && row.photoUrl) {
-      meal.imageUrl = row.photoUrl;
+    if (row.photoUrl && typeof row.photoUrl === 'string') {
+      const parts = row.photoUrl
+        .split(/[,;\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      if (!meal.photoUrls) {
+        meal.photoUrls = [];
+      }
+      for (const p of parts) {
+        if (!meal.photoUrls.includes(p)) {
+          meal.photoUrls.push(p);
+        }
+      }
+      if (meal.photoUrls.length > 0) {
+        meal.imageUrl = meal.photoUrls.join(', ');
+      }
+
       if (/\.(jpg|jpeg|png|webp|gif|heic)$/i.test(row.photoUrl) || !row.photoUrl.startsWith('http')) {
-        meal.driveFileName = row.photoUrl;
+        if (!meal.driveFileName) {
+          meal.driveFileName = row.photoUrl;
+        } else if (!meal.driveFileName.includes(row.photoUrl)) {
+          meal.driveFileName = `${meal.driveFileName}, ${row.photoUrl}`;
+        }
       }
     }
     if (!meal.mealDiagnosis && row.mealDiagnosis) {

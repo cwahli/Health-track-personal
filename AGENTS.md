@@ -28,6 +28,11 @@
 - **Action**: Use in-place `/api/sheets/edit-meal-log` targeting the exact `mealId` rows, preserving original Drive photo URLs and avoiding duplicate card entries.
 - **Action**: Validate server responses for edits using composite success flags (`responseData.success || responseData.googleSheetsAppended || responseData.googleSheetsEdited`). Reset loading states immediately on any caught exception.
 
+**[CONDITION: Setting Top Meal Photo for Previews]**
+- **Action**: Lightbox header provides a toggle switch to set the active photo as top preview (`currentIndex === 0`).
+- **Action**: When toggled, reorders `meal.photoUrls` with the selected photo at index 0 and persists to Google Sheets Column AO via `/api/sheets/update-meal-photos`.
+- **Action**: Re-uses existing `SheetConnectionModal` and `googleAuth` components without creating redundant login flows.
+
 **[CONDITION: Handling API & Credentials]**
 - **Action**: Keep all Gemini and Google service credentials strictly isolated on the server (`server.ts` or `/api/*`).
 - **Action**: Bind server strictly to port `3000` and host `0.0.0.0`.

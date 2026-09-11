@@ -1069,6 +1069,103 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
   }
 });
 
+// 2.65 Update Meal Photo Order in Google Sheet (Column AO)
+app.post('/api/sheets/update-meal-photos', async (req, res) => {
+  try {
+    const { mealId, photoUrl, sheetUrl, accessToken } = req.body;
+    if (!mealId || photoUrl === undefined) {
+      return res.status(400).json({ success: false, error: 'mealId and photoUrl are required' });
+    }
+
+    const spreadsheetUrl = sheetUrl;
+    const spreadsheetId = spreadsheetUrl ? extractGoogleSpreadsheetId(spreadsheetUrl) : null;
+
+    if (!spreadsheetId || !accessToken) {
+      return res.json({
+        success: true,
+        localOnly: true,
+        googleSheetsUpdated: false,
+        mealId,
+        message: 'Photo order updated locally.',
+      });
+    }
+
+    await globalSheetMutex.lock(spreadsheetId);
+    try {
+      const info = await ensureMealLogSheetExists(spreadsheetId, accessToken);
+      const exactTabName = info.name;
+
+      // 1. Locate all matching rows for mealId (Column B is Meal ID, AO is Photo URL)
+      const rangeParamB = encodeURIComponent(`'${exactTabName}'!B:AO`);
+      const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${rangeParamB}`;
+      const getRes = await fetch(getUrl, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+
+      if (!getRes.ok) {
+        throw new Error(`Failed to read sheet to update photo order: ${getRes.statusText}`);
+      }
+
+      const getData = await getRes.json();
+      const allRows = getData.values || [];
+      const dataToUpdate: Array<{ range: string; values: string[][] }> = [];
+
+      const cleanTargetId = String(mealId).trim().toUpperCase();
+
+      for (let i = 0; i < allRows.length; i++) {
+        const row = allRows[i];
+        if (row && row[0] && String(row[0]).trim().toUpperCase() === cleanTargetId) {
+          // Row index in sheet is 1-based (i=0 is row 1)
+          const sheetRowNumber = i + 1;
+          dataToUpdate.push({
+            range: `'${exactTabName}'!AO${sheetRowNumber}`,
+            values: [[String(photoUrl)]],
+          });
+        }
+      }
+
+      if (dataToUpdate.length > 0) {
+        const batchUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`;
+        const updateRes = await fetch(batchUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            valueInputOption: 'USER_ENTERED',
+            data: dataToUpdate,
+          }),
+        });
+
+        if (!updateRes.ok) {
+          const errText = await updateRes.text();
+          throw new Error(`Failed to update photo order cells: ${errText}`);
+        }
+      }
+
+      return res.json({
+        success: true,
+        googleSheetsUpdated: dataToUpdate.length > 0,
+        updatedRowCount: dataToUpdate.length,
+        mealId,
+        message: dataToUpdate.length > 0
+          ? `Updated photo in Google Sheet for ${dataToUpdate.length} row(s).`
+          : 'Meal ID not found in remote sheet; updated locally.',
+      });
+    } finally {
+      globalSheetMutex.unlock(spreadsheetId);
+    }
+  } catch (error: any) {
+    console.warn('Error in update-meal-photos:', error);
+    return res.status(500).json({
+      success: false,
+      googleSheetsUpdated: false,
+      error: error.message || 'Failed to update photo in Google Sheet',
+    });
+  }
+});
+
 // 2.7 Delete meal rows from Google Sheet with Photo Extraction & Zero-Row Verification Gate
 app.post('/api/sheets/delete-meal-log', async (req, res) => {
   try {

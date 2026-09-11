@@ -29,7 +29,8 @@ import {
   LoggedMeal,
   MealLogRow,
 } from "./types";
-import { formatDriveImageUrl } from "./utils/driveImage";
+import { formatDriveImageUrl, MealPhotoItem } from "./utils/driveImage";
+import { getAccessToken, googleSignIn } from "./utils/googleAuth";
 import { Header } from "./components/Header";
 import { DaySelector } from "./components/DaySelector";
 import { DiagnosisBanner } from "./components/DiagnosisBanner";
@@ -138,6 +139,138 @@ export default function App() {
     );
     setUpdateNotification("Meal photo updated with actual picture!");
     setTimeout(() => setUpdateNotification(null), 3500);
+  };
+
+  const handleSetMealTopPhoto = async (
+    meal: LoggedMeal,
+    selectedPhoto: MealPhotoItem,
+    newOrderedPhotos: MealPhotoItem[]
+  ): Promise<boolean> => {
+    // 1. Reconstruct photo URLs list with selected photo at index 0
+    const existingUrls = meal.photoUrls && meal.photoUrls.length > 0 ? meal.photoUrls : (meal.imageUrl ? [meal.imageUrl] : []);
+    
+    const newUrls = newOrderedPhotos.map((p) => {
+      const match = existingUrls.find((u) => {
+        if (p.fileId && u.includes(p.fileId)) return true;
+        if (p.fileName && u.includes(p.fileName)) return true;
+        if (p.url && (u === p.url || p.url.includes(u))) return true;
+        return false;
+      });
+      return match || p.driveUrl || p.url;
+    });
+
+    const newPhotoUrlString = newUrls.join(', ');
+    const newFileNames = newOrderedPhotos.map((p) => p.fileName).filter(Boolean).join(', ');
+    const targetMealId = meal.mealId || meal.id;
+
+    // 2. Immediate local state update for fast reactive card preview
+    setMeals((prev) =>
+      prev.map((m) => {
+        if (m.id === meal.id || (m.mealId && m.mealId === targetMealId)) {
+          return {
+            ...m,
+            imageUrl: newUrls[0] || newPhotoUrlString,
+            photoUrls: newUrls,
+            driveFileName: newFileNames || m.driveFileName,
+          };
+        }
+        return m;
+      })
+    );
+
+    setMealSheetRows((prev) =>
+      prev.map((r) => {
+        if (r.mealId && targetMealId && r.mealId.trim().toUpperCase() === targetMealId.trim().toUpperCase()) {
+          return {
+            ...r,
+            photoUrl: newPhotoUrlString,
+          };
+        }
+        return r;
+      })
+    );
+
+    try {
+      const stored = localStorage.getItem("nutrihealth_logged_meals");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        const updated = parsed.map((m: any) => {
+          if (m.id === meal.id || (m.mealId && m.mealId === targetMealId)) {
+            return {
+              ...m,
+              imageUrl: newUrls[0] || newPhotoUrlString,
+              photoUrls: newUrls,
+              driveFileName: newFileNames || m.driveFileName,
+            };
+          }
+          return m;
+        });
+        localStorage.setItem("nutrihealth_logged_meals", JSON.stringify(updated));
+      }
+    } catch (e) {
+      console.warn("Could not save to localStorage", e);
+    }
+
+    // 3. Update in Google Sheet
+    const targetSheetUrl = sheetConfig.sheetUrl || localStorage.getItem("nutrihealth_sheet_url") || "";
+    if (!targetSheetUrl) {
+      setIsConnectModalOpen(true);
+      setUpdateNotification("Top photo updated locally. Connect Google Sheet to persist changes to spreadsheet.");
+      setTimeout(() => setUpdateNotification(null), 4500);
+      return true;
+    }
+
+    let token = await getAccessToken();
+    if (!token) {
+      setUpdateNotification("Authorizing with Google to update spreadsheet...");
+      try {
+        const authRes = await googleSignIn();
+        if (!authRes?.accessToken) {
+          setUpdateNotification("Top photo updated locally. Google sign-in required to update spreadsheet.");
+          setTimeout(() => setUpdateNotification(null), 4000);
+          return true;
+        }
+        token = authRes.accessToken;
+      } catch (authErr) {
+        console.warn("Google sign-in cancelled:", authErr);
+        setUpdateNotification("Top photo updated locally.");
+        setTimeout(() => setUpdateNotification(null), 3000);
+        return true;
+      }
+    }
+
+    try {
+      const res = await fetch("/api/sheets/update-meal-photos", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          mealId: targetMealId,
+          photoUrl: newPhotoUrlString,
+          sheetUrl: targetSheetUrl,
+          accessToken: token,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success || data.googleSheetsUpdated) {
+        setUpdateNotification("Top preview photo updated in Google Sheet!");
+        setTimeout(() => setUpdateNotification(null), 3500);
+        return true;
+      } else {
+        console.warn("Google Sheet photo update notice:", data.error || data.message);
+        setUpdateNotification("Updated locally. " + (data.message || ""));
+        setTimeout(() => setUpdateNotification(null), 3500);
+        return true;
+      }
+    } catch (apiErr: any) {
+      console.warn("Error calling update-meal-photos:", apiErr);
+      setUpdateNotification("Updated locally. Sheet sync will retry on next sync.");
+      setTimeout(() => setUpdateNotification(null), 3500);
+      return true;
+    }
   };
 
   const handleResetDefaultMeals = () => {
@@ -486,12 +619,20 @@ export default function App() {
                   
                   const resolvedImg = bm.imageUrl || pm?.imageUrl || (bm.driveFileName ? formatDriveImageUrl(bm.driveFileName, bm.mealId) : undefined);
                   const resolvedFileName = bm.driveFileName || pm?.driveFileName || (bm.foodName ? `${bm.foodName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg` : undefined);
+                  const resolvedPhotoUrls = (bm.photoUrls && bm.photoUrls.length > 0)
+                    ? bm.photoUrls
+                    : (pm?.photoUrls && pm.photoUrls.length > 0)
+                      ? pm.photoUrls
+                      : (bm.imageUrl ? bm.imageUrl.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean) : (pm?.imageUrl ? pm.imageUrl.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean) : undefined));
+
                   return {
                     ...bm,
                     id: pm?.id || bm.id,
                     imageUrl: resolvedImg || undefined,
+                    photoUrls: resolvedPhotoUrls && resolvedPhotoUrls.length > 0 ? resolvedPhotoUrls : undefined,
                     driveFileName: resolvedFileName,
                     driveFileId: bm.driveFileId || pm?.driveFileId,
+                    driveFileIds: bm.driveFileIds || pm?.driveFileIds,
                     clinicalNote: bm.clinicalNote || bm.mealDiagnosis || pm?.clinicalNote || pm?.mealDiagnosis,
                     mealDiagnosis: bm.mealDiagnosis || pm?.mealDiagnosis,
                     dailyDiagnosis: bm.dailyDiagnosis || pm?.dailyDiagnosis,
@@ -770,6 +911,7 @@ export default function App() {
 
             onResetDefaultMeals={handleResetDefaultMeals}
             onUpdateMealPhoto={handleUpdateMealPhoto}
+            onSetMealTopPhoto={handleSetMealTopPhoto}
           />
         )}
 
@@ -786,6 +928,7 @@ export default function App() {
             clinicalDiagnoses={sheetState.clinicalDiagnoses}
 
             onUpdateMealPhoto={handleUpdateMealPhoto}
+            onSetMealTopPhoto={handleSetMealTopPhoto}
           />
         )}
 
