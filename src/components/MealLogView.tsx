@@ -14,6 +14,7 @@ import {
   CheckCircle2, 
   AlertTriangle, 
   Trash2, 
+  FileEdit,
   Sparkles, 
   Image as ImageIcon, 
   ExternalLink, 
@@ -41,6 +42,7 @@ interface MealLogViewProps {
   columns: DayColumn[];
   onAddMeal: (meal: Omit<LoggedMeal, 'id'>, sheetRows?: MealLogRow[]) => void;
   onDeleteMeal: (id: string) => void;
+  onReviewMeal?: (meal: LoggedMeal) => void;
   isDeletingMealId?: string | null;
   onOpenMealSimulator?: () => void;
   onResetDefaultMeals?: () => void;
@@ -52,6 +54,7 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   columns,
   onAddMeal,
   onDeleteMeal,
+  onReviewMeal,
   isDeletingMealId,
   onOpenMealSimulator,
   onResetDefaultMeals,
@@ -633,18 +636,31 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                     ))}
                   </div>
 
-                  {/* Bin lower down on card */}
-                  <button
-                    onClick={() => onDeleteMeal(meal.id)}
-                    className="p-1.5 text-slate-500 hover:text-rose-400 transition rounded-lg hover:bg-slate-800/80 cursor-pointer shrink-0 ml-auto flex items-center gap-1 text-xs"
-                    title="Delete meal entry"
-                  >
-                    {isDeletingMealId === meal.id ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
-                    ) : (
-                      <Trash2 className="w-3.5 h-3.5" />
-                    )}
-                  </button>
+                  {/* Card Action Controls: only shown on card roll-over / hover */}
+                  <div className="flex items-center gap-1 shrink-0 ml-auto opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReviewMeal?.(meal);
+                      }}
+                      className="p-1.5 text-slate-400 hover:text-emerald-400 transition rounded-lg hover:bg-slate-800/80 cursor-pointer flex items-center gap-1 text-xs"
+                      title="Review & edit meal in chat"
+                    >
+                      <FileEdit className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      onClick={() => onDeleteMeal(meal.id)}
+                      className="p-1.5 text-slate-500 hover:text-rose-400 transition rounded-lg hover:bg-slate-800/80 cursor-pointer flex items-center gap-1 text-xs"
+                      title="Delete meal entry"
+                    >
+                      {isDeletingMealId === meal.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
               </div>

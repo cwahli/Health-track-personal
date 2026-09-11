@@ -254,9 +254,14 @@ export default function App() {
       return [created, ...prev];
     });
 
-    // Append component rows to the Google Sheet "meal log" tab state
+    // Append or replace component rows in the Google Sheet "meal log" tab state
     if (newSheetRows && newSheetRows.length > 0) {
-      setMealSheetRows((prev) => [...newSheetRows, ...prev]);
+      setMealSheetRows((prev) => {
+        const filtered = created.mealId
+          ? prev.filter((r) => r.mealId?.toUpperCase() !== created.mealId.toUpperCase())
+          : prev;
+        return [...newSheetRows, ...filtered];
+      });
     }
 
     // Instantly refresh the entire dashboard state from the live sheet
@@ -396,6 +401,7 @@ export default function App() {
     useState<boolean>(false);
   const [isAskCoachOpen, setIsAskCoachOpen] = useState<boolean>(false);
   const [isLogMealOpen, setIsLogMealOpen] = useState<boolean>(false);
+  const [editingMeal, setEditingMeal] = useState<LoggedMeal | null>(null);
   const [updateNotification, setUpdateNotification] = useState<string | null>(
     null,
   );
@@ -756,6 +762,10 @@ export default function App() {
             columns={sheetState.columns}
             onAddMeal={handleAddMeal}
             onDeleteMeal={handleDeleteMeal}
+            onReviewMeal={(meal) => {
+              setEditingMeal(meal);
+              setIsLogMealOpen(true);
+            }}
             isDeletingMealId={isDeletingMealId}
 
             onResetDefaultMeals={handleResetDefaultMeals}
@@ -887,9 +897,13 @@ export default function App() {
 
       <FoodNutritionAgentModal
         isOpen={isLogMealOpen}
-        onClose={() => setIsLogMealOpen(false)}
+        onClose={() => {
+          setEditingMeal(null);
+          setIsLogMealOpen(false);
+        }}
         onAddMeal={handleAddMeal}
         onDeleteMeal={handleDeleteMeal}
+        initialEditingMeal={editingMeal}
       />
     </div>
   );

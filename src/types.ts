@@ -191,6 +191,8 @@ export interface MealLogRow {
   cholesterol: number;
   addedSugars: number;
   sourceRef: string;
+  rawNutrientKeys?: string[];
+  rawNutritionLabel?: any;
   mealDiagnosis?: string;
   dailyDiagnosis?: string;
   photoUrl?: string;

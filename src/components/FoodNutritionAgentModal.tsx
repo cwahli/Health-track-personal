@@ -33,8 +33,146 @@ import {
   Edit3,
   Trash2,
   Plus,
+  Columns,
+  Table,
+  Flame,
+  Scan,
 } from 'lucide-react';
 import { LoggedMeal, MealLogRow } from '../types';
+
+interface NutrientFieldDef {
+  key: keyof MealLogRow;
+  label: string;
+  unit: string;
+  step: string;
+  color?: string;
+}
+
+const MACRO_NUTRIENT_FIELDS: NutrientFieldDef[] = [
+  { key: 'calories', label: 'Calories', unit: 'kcal', step: '1', color: 'text-amber-400 font-bold' },
+  { key: 'protein', label: 'Protein', unit: 'g', step: '0.1', color: 'text-indigo-300 font-semibold' },
+  { key: 'totalFat', label: 'Total Fat', unit: 'g', step: '0.1', color: 'text-amber-300 font-semibold' },
+  { key: 'saturatedFat', label: 'Saturated Fat', unit: 'g', step: '0.1', color: 'text-rose-300' },
+  { key: 'monounsaturatedFat', label: 'Monounsaturated Fat', unit: 'g', step: '0.1' },
+  { key: 'polyunsaturatedFat', label: 'Polyunsaturated Fat', unit: 'g', step: '0.1' },
+  { key: 'transFat', label: 'Trans Fat', unit: 'g', step: '0.1' },
+  { key: 'cholesterol', label: 'Cholesterol', unit: 'mg', step: '1' },
+  { key: 'carbs', label: 'Carbohydrates', unit: 'g', step: '0.1', color: 'text-emerald-300 font-semibold' },
+  { key: 'fiber', label: 'Dietary Fiber', unit: 'g', step: '0.1', color: 'text-emerald-400 font-semibold' },
+  { key: 'totalSugars', label: 'Total Sugars', unit: 'g', step: '0.1' },
+  { key: 'addedSugars', label: 'Added Sugars', unit: 'g', step: '0.1' },
+];
+
+const MICRO_NUTRIENT_FIELDS: NutrientFieldDef[] = [
+  { key: 'sodium', label: 'Sodium', unit: 'mg', step: '1', color: 'text-sky-300' },
+  { key: 'potassium', label: 'Potassium', unit: 'mg', step: '1', color: 'text-emerald-300' },
+  { key: 'calcium', label: 'Calcium', unit: 'mg', step: '1' },
+  { key: 'iron', label: 'Iron', unit: 'mg', step: '0.1' },
+  { key: 'magnesium', label: 'Magnesium', unit: 'mg', step: '1' },
+  { key: 'phosphorus', label: 'Phosphorus', unit: 'mg', step: '1' },
+  { key: 'zinc', label: 'Zinc', unit: 'mg', step: '0.1' },
+  { key: 'selenium', label: 'Selenium', unit: 'mcg', step: '0.1' },
+  { key: 'vitaminA', label: 'Vitamin A', unit: 'mcg RAE', step: '1' },
+  { key: 'vitaminC', label: 'Vitamin C', unit: 'mg', step: '0.1' },
+  { key: 'vitaminD', label: 'Vitamin D', unit: 'mcg', step: '0.1' },
+  { key: 'vitaminE', label: 'Vitamin E', unit: 'mg', step: '0.1' },
+  { key: 'vitaminK', label: 'Vitamin K', unit: 'mcg', step: '0.1' },
+  { key: 'thiaminB1', label: 'Thiamin (B1)', unit: 'mg', step: '0.01' },
+  { key: 'riboflavinB2', label: 'Riboflavin (B2)', unit: 'mg', step: '0.01' },
+  { key: 'niacinB3', label: 'Niacin (B3)', unit: 'mg NE', step: '0.1' },
+  { key: 'vitaminB6', label: 'Vitamin B6', unit: 'mg', step: '0.01' },
+  { key: 'folate', label: 'Folate', unit: 'mcg DFE', step: '1' },
+  { key: 'vitaminB12', label: 'Vitamin B12', unit: 'mcg', step: '0.01' },
+];
+
+/**
+ * Checks whether a nutrient was directly scanned/extracted from packaging OCR
+ * (either tracked in rawNutrientKeys or populated in the rawNutritionLabel object).
+ */
+export const isNutrientFromOcr = (row?: MealLogRow, foodObj?: any, fieldKey?: string): boolean => {
+  if (!row || !fieldKey) return false;
+  if (row.rawNutrientKeys && Array.isArray(row.rawNutrientKeys)) {
+    if (row.rawNutrientKeys.includes(fieldKey)) return true;
+  }
+  const raw = row.rawNutritionLabel || foodObj?.rawNutritionLabel;
+  if (!raw || typeof raw !== 'object') return false;
+
+  const hasVal = (val: any) =>
+    val !== null &&
+    val !== undefined &&
+    val !== '' &&
+    val !== 'null' &&
+    val !== '0%' &&
+    val !== 'N/A' &&
+    val !== 'None';
+
+  switch (fieldKey) {
+    case 'calories':
+      return hasVal(raw.calories) || hasVal(raw.energy) || hasVal(raw.energyKj) || hasVal(raw.energyKcal) || hasVal(raw.kcal);
+    case 'protein':
+      return hasVal(raw.protein);
+    case 'totalFat':
+      return hasVal(raw.totalFat) || hasVal(raw.fat) || hasVal(raw.total_fat);
+    case 'saturatedFat':
+      return hasVal(raw.saturatedFat) || hasVal(raw.satFat) || hasVal(raw.saturated_fat);
+    case 'transFat':
+      return hasVal(raw.transFat) || hasVal(raw.trans_fat);
+    case 'monounsaturatedFat':
+      return hasVal(raw.monounsaturatedFat) || hasVal(raw.mufa);
+    case 'polyunsaturatedFat':
+      return hasVal(raw.polyunsaturatedFat) || hasVal(raw.pufa);
+    case 'cholesterol':
+      return hasVal(raw.cholesterol);
+    case 'carbs':
+      return hasVal(raw.totalCarbohydrate) || hasVal(raw.carbohydrates) || hasVal(raw.carbs) || hasVal(raw.carbohydrate);
+    case 'fiber':
+      return hasVal(raw.totalFibre) || hasVal(raw.dietaryFiber) || hasVal(raw.fiber) || hasVal(raw.fibre);
+    case 'totalSugars':
+      return hasVal(raw.totalSugars) || hasVal(raw.sugar) || hasVal(raw.sugars);
+    case 'addedSugars':
+      return hasVal(raw.addedSugars) || hasVal(raw.addedSugar) || hasVal(raw.added_sugars);
+    case 'sodium':
+      return hasVal(raw.sodium) || hasVal(raw.salt) || hasVal(raw.na);
+    case 'potassium':
+      return hasVal(raw.potassium) || hasVal(raw.k);
+    case 'calcium':
+      return hasVal(raw.calcium) || hasVal(raw.ca);
+    case 'iron':
+      return hasVal(raw.iron) || hasVal(raw.fe);
+    case 'magnesium':
+      return hasVal(raw.magnesium) || hasVal(raw.mg);
+    case 'phosphorus':
+      return hasVal(raw.phosphorus) || hasVal(raw.p);
+    case 'zinc':
+      return hasVal(raw.zinc) || hasVal(raw.zn);
+    case 'selenium':
+      return hasVal(raw.selenium) || hasVal(raw.se);
+    case 'vitaminA':
+      return hasVal(raw.vitaminA) || hasVal(raw.vitA);
+    case 'vitaminC':
+      return hasVal(raw.vitaminC) || hasVal(raw.vitC) || hasVal(raw.ascorbicAcid);
+    case 'vitaminD':
+      return hasVal(raw.vitaminD) || hasVal(raw.vitD);
+    case 'vitaminE':
+      return hasVal(raw.vitaminE) || hasVal(raw.vitE);
+    case 'vitaminK':
+      return hasVal(raw.vitaminK) || hasVal(raw.vitK);
+    case 'vitaminB12':
+      return hasVal(raw.vitaminB12) || hasVal(raw.vitB12) || hasVal(raw.b12) || hasVal(raw.cobalamin);
+    case 'folate':
+      return hasVal(raw.folate) || hasVal(raw.folicAcid) || hasVal(raw.b9);
+    case 'vitaminB6':
+      return hasVal(raw.vitaminB6) || hasVal(raw.vitB6) || hasVal(raw.b6) || hasVal(raw.pyridoxine);
+    case 'thiaminB1':
+      return hasVal(raw.thiaminB1) || hasVal(raw.thiamin) || hasVal(raw.thiamine) || hasVal(raw.vitB1) || hasVal(raw.b1);
+    case 'riboflavinB2':
+      return hasVal(raw.riboflavinB2) || hasVal(raw.riboflavin) || hasVal(raw.vitB2) || hasVal(raw.b2);
+    case 'niacinB3':
+      return hasVal(raw.niacinB3) || hasVal(raw.niacin) || hasVal(raw.niacinamide) || hasVal(raw.vitB3) || hasVal(raw.b3);
+    default:
+      return hasVal(raw[fieldKey]);
+  }
+};
 import { GOOGLE_DRIVE_FOLDER_ID, GOOGLE_DRIVE_FOLDER_URL } from '../data/googleDriveFolderData';
 import {
   uploadImageToGoogleDrive,
@@ -46,6 +184,7 @@ import { getAccessToken, isGoogleDriveAuthorized, googleSignIn } from '../utils/
 import { compressImageToTargetSize, formatBytes } from '../utils/imageCompressor';
 import { DiagnosticTracker } from '../utils/diagnosticReport';
 import { getDailyNutrientLedger } from '../utils/dashboardFoodLedger';
+import { formatDriveImageUrl } from '../utils/driveImage';
 import exifr from 'exifr';
 
 interface FoodNutritionAgentModalProps {
@@ -58,6 +197,7 @@ interface FoodNutritionAgentModalProps {
   defaultDateStr?: string;
   initialSelectedFile?: File | null;
   initialSelectedFiles?: File[] | null;
+  initialEditingMeal?: LoggedMeal | null;
 }
 
 export interface StagedPhotoItem {
@@ -65,6 +205,8 @@ export interface StagedPhotoItem {
   file: File;
   previewUrl: string;
   compressedSizeFormatted?: string;
+  isExistingDrivePhoto?: boolean;
+  existingPhotoUrl?: string;
 }
 
 interface ChatMessage {
@@ -141,6 +283,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
   defaultDateStr = '2026-09-08',
   initialSelectedFile = null,
   initialSelectedFiles = null,
+  initialEditingMeal = null,
 }) => {
   // Selected model defaults to flash 3.5 lite per user instructions
   const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash-lite');
@@ -167,23 +310,66 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
 
   useEffect(() => {
     if (isOpen) {
-      setActiveMealId(defaultMealId);
-      const fetchNextId = async () => {
-        try {
-          const sheetUrl = localStorage.getItem('nutrihealth_sheet_url') || '';
-          let accessToken = await getAccessToken();
-          const idRes = await fetch(`/api/sheets/next-meal-id?sheetUrl=${encodeURIComponent(sheetUrl)}&token=${encodeURIComponent(accessToken || '')}`);
-          if (idRes.ok) {
-             const idData = await idRes.json();
-             if (idData.nextMealId) setActiveMealId(idData.nextMealId);
-          }
-        } catch(e) {
-          console.warn('Could not fetch next meal ID:', e);
+      if (initialEditingMeal) {
+        // Pre-hydrate review & edit mode
+        setActiveMealId(initialEditingMeal.mealId || defaultMealId);
+        if (initialEditingMeal.dateStr) {
+          setPhotoDateStr(initialEditingMeal.dateStr);
         }
-      };
-      fetchNextId();
+
+        const rawUrls: string[] = [];
+        if (initialEditingMeal.imageUrl) {
+          initialEditingMeal.imageUrl.split(',').forEach((u) => {
+            const t = u.trim();
+            if (t) rawUrls.push(t);
+          });
+        }
+        if (rawUrls.length === 0 && initialEditingMeal.driveFileName) {
+          rawUrls.push(initialEditingMeal.driveFileName);
+        }
+
+        const originalStaged: StagedPhotoItem[] = rawUrls.map((url, idx) => {
+          const formatted = formatDriveImageUrl(url, initialEditingMeal.mealId) || url;
+          return {
+            id: `original-photo-${idx}-${Date.now()}`,
+            file: new File([], `meal_${initialEditingMeal.mealId}_photo_${idx + 1}.jpg`, { type: 'image/jpeg' }),
+            previewUrl: formatted,
+            compressedSizeFormatted: 'Original Photo',
+            isExistingDrivePhoto: true,
+            existingPhotoUrl: formatted,
+          };
+        });
+
+        setStagedPhotos(originalStaged);
+
+        setMessages([
+          {
+            id: `edit-greeting-${Date.now()}`,
+            sender: 'agent',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            text: `📝 **Review & Edit Mode**: You are reviewing **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) logged on **${initialEditingMeal.dateStr || 'today'}**.\n\nAll original photos are attached (${originalStaged.length} photo${originalStaged.length === 1 ? '' : 's'}). Type your edit instructions below (e.g. *“Change portion to 150g”*, *“Adjust sodium to 65mg from label”*, or *“Recalculate with unsweetened oat milk”*) and send to re-evaluate.\n\n*Note: Saving updates the existing Google Sheet cells in-place without creating duplicate Drive photos.*`,
+            imageUrls: originalStaged.map((p) => p.previewUrl),
+          },
+        ]);
+      } else {
+        setActiveMealId(defaultMealId);
+        const fetchNextId = async () => {
+          try {
+            const sheetUrl = localStorage.getItem('nutrihealth_sheet_url') || '';
+            let accessToken = await getAccessToken();
+            const idRes = await fetch(`/api/sheets/next-meal-id?sheetUrl=${encodeURIComponent(sheetUrl)}&token=${encodeURIComponent(accessToken || '')}`);
+            if (idRes.ok) {
+               const idData = await idRes.json();
+               if (idData.nextMealId) setActiveMealId(idData.nextMealId);
+            }
+          } catch(e) {
+            console.warn('Could not fetch next meal ID:', e);
+          }
+        };
+        fetchNextId();
+      }
     }
-  }, [isOpen, defaultMealId]);
+  }, [isOpen, defaultMealId, initialEditingMeal]);
 
   // Active chat state
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -213,15 +399,25 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
   const [editingRowIndex, setEditingRowIndex] = useState<{ msgId: string; rowIndex: number } | null>(null);
   const [customWeights, setCustomWeights] = useState<Record<string, string>>({});
   const [selectedDiscrepancyRow, setSelectedDiscrepancyRow] = useState<Record<string, number | 'all'>>({});
+  const [nutrientViewMode, setNutrientViewMode] = useState<'vertical_2col' | 'table'>('vertical_2col');
+  const [activeComponentRow, setActiveComponentRow] = useState<Record<string, number>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const prevMessagesCountRef = useRef(messages.length);
+  const prevAnalyzingRef = useRef(isAnalyzing);
 
-  // Auto-scroll chat on new messages
+  // Auto-scroll chat only when a new message is appended or analysis starts (do not auto-scroll on gram/nutrient edits)
   useEffect(() => {
-    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isAnalyzing]);
+    const isNewMessage = messages.length > prevMessagesCountRef.current;
+    const justStartedAnalyzing = isAnalyzing && !prevAnalyzingRef.current;
+    if (isNewMessage || justStartedAnalyzing) {
+      chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+    prevMessagesCountRef.current = messages.length;
+    prevAnalyzingRef.current = isAnalyzing;
+  }, [messages.length, isAnalyzing]);
 
   // Load dashboard-food daily nutrient ledger
   useEffect(() => {
@@ -411,31 +607,42 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         setPhotoDateStr(extractedDateStr);
       }
 
-      // 2. Prepare images as base64 for Gemini (files are already compressed <200KB during staging phase)
+      // 2. Prepare images as base64 or URLs for Gemini (files are already compressed <200KB during staging phase)
       const compressedFilesToStore: File[] = [];
-      const preparedImages: Array<{ base64: string; mimeType: string; fileName: string }> = [];
+      const preparedImages: Array<{ base64?: string; url?: string; mimeType: string; fileName: string }> = [];
 
-      if (rawFiles.length > 0) {
-        setAnalysisStatus(`Preparing ${rawFiles.length} photo(s) for analysis...`);
-        for (let i = 0; i < rawFiles.length; i++) {
-          const fileToUse = rawFiles[i];
-          compressedFilesToStore.push(fileToUse);
+      if (currentStaged.length > 0) {
+        setAnalysisStatus(`Preparing ${currentStaged.length} photo(s) for analysis...`);
+        for (let i = 0; i < currentStaged.length; i++) {
+          const item = currentStaged[i];
+          if (item.isExistingDrivePhoto && item.existingPhotoUrl) {
+            preparedImages.push({
+              base64: '',
+              url: item.existingPhotoUrl,
+              mimeType: 'image/jpeg',
+              fileName: item.file.name,
+            });
+          } else {
+            const fileToUse = item.file;
+            compressedFilesToStore.push(fileToUse);
+            const base64 = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(fileToUse);
+            });
 
-          const base64 = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(fileToUse);
-          });
-
-          preparedImages.push({
-            base64,
-            mimeType: fileToUse.type || 'image/jpeg',
-            fileName: fileToUse.name,
-          });
+            preparedImages.push({
+              base64,
+              mimeType: fileToUse.type || 'image/jpeg',
+              fileName: fileToUse.name,
+            });
+          }
         }
-        userMsg.pendingImageFiles = compressedFilesToStore;
-        userMsg.pendingImageFile = compressedFilesToStore[0];
+        if (compressedFilesToStore.length > 0) {
+          userMsg.pendingImageFiles = compressedFilesToStore;
+          userMsg.pendingImageFile = compressedFilesToStore[0];
+        }
       }
 
       // 3. Fetch live or local daily nutrient ledger context
@@ -467,10 +674,25 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           userMessage: userText,
           preferredModel: selectedModel,
           mealId: activeMealId,
-          mealSlot: defaultMealSlot,
+          mealSlot: initialEditingMeal?.mealType || defaultMealSlot,
           dateStr: extractedDateStr,
           dailyNutrientsContext: dailyLedgerContent,
-          existingAnalysis: lastAgentMsg?.analysis,
+          existingAnalysis: lastAgentMsg?.analysis || (initialEditingMeal ? {
+            dishName: initialEditingMeal.foodName,
+            rows: [],
+            aggregatedTotals: {
+              calories: initialEditingMeal.calories,
+              protein: initialEditingMeal.protein,
+              totalFat: initialEditingMeal.totalFat,
+              saturatedFat: initialEditingMeal.saturatedFat,
+              carbs: initialEditingMeal.carbs,
+              fiber: initialEditingMeal.fiber,
+              sodium: initialEditingMeal.sodium,
+              potassium: initialEditingMeal.potassium,
+              addedSugars: initialEditingMeal.addedSugars,
+            }
+          } : undefined),
+          isEditMode: Boolean(initialEditingMeal),
         }),
       });
 
@@ -484,6 +706,23 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
 
       const result = await response.json();
 
+      let trueRawModelEmission: any = result;
+      if (result.rawModelEmission) {
+        try {
+          trueRawModelEmission = JSON.parse(result.rawModelEmission);
+        } catch {
+          trueRawModelEmission = result.rawModelEmission;
+        }
+      } else if (result.foods) {
+        trueRawModelEmission = {
+          dishName: result.dishName,
+          foods: result.foods,
+          mealDiagnosis: result.mealDiagnosis,
+          dailyDiagnosis: result.dailyDiagnosis,
+          clinicalSummary: result.clinicalSummary,
+        };
+      }
+
       // Record dispatch into DiagnosticTracker
       tracker.recordDispatch({
         name: 'AnalyzeMealPhoto',
@@ -491,7 +730,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         receivedParams: { mealId: activeMealId, dateStr: extractedDateStr, photoCount: preparedImages.length },
         systemInstruction: 'Analyze meal with Atwater macro consistency and zero duplication clinical diagnosis',
         userPrompt: userText,
-        rawEmission: result,
+        rawEmission: trueRawModelEmission,
         model: result.modelUsed || selectedModel,
         latencyMs,
         tokens: 0,
@@ -499,6 +738,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
 
       // Update gate result in tracker
       if (result.atwaterEvaluation) {
+        const firstRow = result.rows?.[0];
+        const totals = result.aggregatedTotals;
         tracker.updateLedgerAndGate({
           dishName: result.dishName,
           totalWeightG: result.atwaterEvaluation.totalWeightG,
@@ -508,14 +749,43 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           fat: result.atwaterEvaluation.fat,
           fiber: result.aggregatedTotals?.fiber ?? 0,
           agentMessage: result.clinicalSummary,
+          dishes: result.foods?.length ? [{
+            dishName: result.dishName,
+            totalWeightG: result.totalDishWeightG || result.atwaterEvaluation.totalWeightG,
+            foods: result.foods,
+          }] : undefined,
           comprehensiveNutrients: {
-            'Calories': `${result.aggregatedTotals?.calories ?? 0} kcal`,
-            'Protein': `${result.aggregatedTotals?.protein ?? 0} g`,
-            'Carbohydrates': `${result.aggregatedTotals?.carbs ?? 0} g`,
-            'Total Fat': `${result.aggregatedTotals?.totalFat ?? 0} g`,
-            'Saturated Fat': `${result.aggregatedTotals?.saturatedFat ?? 0} g`,
-            'Sodium': `${result.aggregatedTotals?.sodium ?? 0} mg`,
-            'Dietary Fiber': `${result.aggregatedTotals?.fiber ?? 0} g`
+            'Calories': `${totals?.calories ?? firstRow?.calories ?? 0} kcal`,
+            'Protein': `${totals?.protein ?? firstRow?.protein ?? 0} g`,
+            'Total Fat': `${totals?.totalFat ?? firstRow?.totalFat ?? 0} g`,
+            'Saturated Fat': `${totals?.saturatedFat ?? firstRow?.saturatedFat ?? 0} g`,
+            'Monounsaturated Fat': `${firstRow?.monounsaturatedFat ?? 0} g`,
+            'Polyunsaturated Fat': `${firstRow?.polyunsaturatedFat ?? 0} g`,
+            'Trans Fat': `${firstRow?.transFat ?? 0} g`,
+            'Cholesterol': `${firstRow?.cholesterol ?? 0} mg`,
+            'Total Carbohydrates': `${totals?.carbs ?? firstRow?.carbs ?? 0} g`,
+            'Dietary Fiber': `${totals?.fiber ?? firstRow?.fiber ?? 0} g`,
+            'Total Sugars': `${firstRow?.totalSugars ?? 0} g`,
+            'Added Sugars': `${totals?.addedSugars ?? firstRow?.addedSugars ?? 0} g`,
+            'Sodium': `${totals?.sodium ?? firstRow?.sodium ?? 0} mg`,
+            'Potassium': `${totals?.potassium ?? firstRow?.potassium ?? 0} mg`,
+            'Calcium': `${firstRow?.calcium ?? 0} mg`,
+            'Iron': `${firstRow?.iron ?? 0} mg`,
+            'Magnesium': `${firstRow?.magnesium ?? 0} mg`,
+            'Phosphorus': `${firstRow?.phosphorus ?? 0} mg`,
+            'Zinc': `${firstRow?.zinc ?? 0} mg`,
+            'Selenium': `${firstRow?.selenium ?? 0} mcg`,
+            'Vitamin A': `${firstRow?.vitaminA ?? 0} mcg`,
+            'Vitamin C': `${firstRow?.vitaminC ?? 0} mg`,
+            'Vitamin D': `${firstRow?.vitaminD ?? 0} mcg`,
+            'Vitamin E': `${firstRow?.vitaminE ?? 0} mg`,
+            'Vitamin K': `${firstRow?.vitaminK ?? 0} mcg`,
+            'Thiamin (B1)': `${firstRow?.thiaminB1 ?? 0} mg`,
+            'Riboflavin (B2)': `${firstRow?.riboflavinB2 ?? 0} mg`,
+            'Niacin (B3)': `${firstRow?.niacinB3 ?? 0} mg`,
+            'Vitamin B6': `${firstRow?.vitaminB6 ?? 0} mg`,
+            'Folate': `${firstRow?.folate ?? 0} mcg`,
+            'Vitamin B12': `${firstRow?.vitaminB12 ?? 0} mcg`,
           }
         });
       }
@@ -537,9 +807,9 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           portionWeightG: result.portionWeightG,
           weightDifferenceDetected: result.weightDifferenceDetected,
           weightClarificationPrompt: result.weightClarificationPrompt,
-          mealDiagnosis: result.mealDiagnosis || result.clinicalSummary || '',
-          dailyDiagnosis: result.dailyDiagnosis || result.clinicalSummary || '',
-          clinicalSummary: result.clinicalSummary || 'Clinical nutrient breakdown complete.',
+          mealDiagnosis: result.mealDiagnosis || '',
+          dailyDiagnosis: result.dailyDiagnosis || '',
+          clinicalSummary: result.clinicalSummary || result.mealDiagnosis || 'Clinical nutrient breakdown complete.',
           rows: result.rows || [],
           columnHeaders: result.columnHeaders || [],
           tsvFormatted: result.tsvFormatted || '',
@@ -680,7 +950,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         };
 
         const totalWeight = updatedRows.reduce((sum, r) => sum + (Number(r.weightG) || 0), 0);
-        const atwaterSum = Math.round(agg.protein * 4 + agg.carbs * 4 + agg.totalFat * 9 + agg.fiber * 2);
+        const netCarb = Math.max(0, agg.carbs - agg.fiber);
+        const atwaterSum = Math.round(agg.protein * 4 + netCarb * 4 + agg.totalFat * 9 + agg.fiber * 2);
         const atwaterDiff = Math.abs(agg.calories - atwaterSum);
 
         const headers = msg.analysis.columnHeaders || [];
@@ -757,7 +1028,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         };
 
         const totalWeight = scaledRows.reduce((sum, r) => sum + (Number(r.weightG) || 0), 0);
-        const atwaterSum = Math.round(agg.protein * 4 + agg.carbs * 4 + agg.totalFat * 9 + agg.fiber * 2);
+        const netCarb = Math.max(0, agg.carbs - agg.fiber);
+        const atwaterSum = Math.round(agg.protein * 4 + netCarb * 4 + agg.totalFat * 9 + agg.fiber * 2);
         const atwaterDiff = Math.abs(agg.calories - atwaterSum);
 
         const headers = msg.analysis.columnHeaders || [];
@@ -965,8 +1237,16 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     let primaryDriveUrl = relatedUserMsg?.driveFileUrl || '';
     let driveFileName = relatedUserMsg?.imageFileName || `${activeMealId}_dish.jpg`;
 
-    // 1. Upload to Google Drive concurrently with strict rollback guarantee
-    if (filesToUpload.length > 0 && uploadedDriveFileUrls.length === 0) {
+    if (initialEditingMeal) {
+      primaryDriveUrl = initialEditingMeal.imageUrl || '';
+      uploadedDriveFileUrls = initialEditingMeal.imageUrl
+        ? initialEditingMeal.imageUrl.split(',').map((s) => s.trim()).filter(Boolean)
+        : [];
+      driveFileName = initialEditingMeal.driveFileName || `${activeMealId}_dish.jpg`;
+    }
+
+    // 1. Upload to Google Drive concurrently (only for new meals; edits preserve existing Drive files)
+    if (!initialEditingMeal && filesToUpload.length > 0 && uploadedDriveFileUrls.length === 0) {
       try {
         setSavingStatusMsg(`Uploading ${filesToUpload.length} photo(s) to Google Drive ("Personal food")...`);
         const dateToUse = photoDateStr || defaultDateStr || new Date().toISOString().split('T')[0];
@@ -1012,29 +1292,43 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
       }
     }
 
-    // 2. Append rows to Google Sheet "meal log" tab with zero-duplication enforcement
-    setSavingStatusMsg(`Appending ${msg.analysis.rows.length} component rows to spreadsheet "meal log" tab...`);
+    // 2. Append or Edit rows in Google Sheet "meal log" tab
+    setSavingStatusMsg(
+      initialEditingMeal
+        ? `Updating ${msg.analysis.rows.length} component rows in spreadsheet "meal log" tab...`
+        : `Appending ${msg.analysis.rows.length} component rows to spreadsheet "meal log" tab...`
+    );
 
     const allDriveUrlsJoined = uploadedDriveFileUrls.join(', ') || primaryDriveUrl;
 
     // Enforce Zero-Duplication Rule: Row 0 gets mealDiagnosis and dailyDiagnosis. Rows 1..N get empty strings.
     const enrichedRows = msg.analysis.rows.map((r: any, idx: number) => ({
       ...r,
-      photoUrl: allDriveUrlsJoined,
+      photoUrl: allDriveUrlsJoined || (initialEditingMeal?.imageUrl || ''),
       mealDiagnosis: idx === 0 ? (msg.analysis?.mealDiagnosis || msg.analysis?.clinicalSummary || '') : '',
       dailyDiagnosis: idx === 0 ? (msg.analysis?.dailyDiagnosis || msg.analysis?.clinicalSummary || '') : '',
     }));
 
     try {
       const sheetUrl = localStorage.getItem('nutrihealth_sheet_url') || '';
-      const appendRes = await fetch('/api/sheets/append-meal-log', {
+      const endpoint = initialEditingMeal ? '/api/sheets/edit-meal-log' : '/api/sheets/append-meal-log';
+      const bodyPayload = initialEditingMeal
+        ? {
+            mealId: initialEditingMeal.mealId || activeMealId,
+            newRows: enrichedRows,
+            sheetUrl,
+            accessToken,
+          }
+        : {
+            rows: enrichedRows,
+            sheetUrl,
+            accessToken,
+          };
+
+      const appendRes = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          rows: enrichedRows,
-          sheetUrl,
-          accessToken,
-        }),
+        body: JSON.stringify(bodyPayload),
       });
 
       if (!appendRes.ok) {
@@ -1043,13 +1337,14 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
       }
 
       const responseData = await appendRes.json();
-      if (sheetUrl && !responseData.googleSheetsAppended) {
-        throw new Error(responseData.googleSheetError || 'Failed to sync to Google Sheet (Token may be expired or permissions missing).');
+      const isSuccess = Boolean(responseData.success || responseData.googleSheetsAppended || responseData.googleSheetsEdited);
+      if (sheetUrl && !isSuccess) {
+        throw new Error(responseData.googleSheetError || responseData.error || 'Failed to sync to Google Sheet (Token may be expired or permissions missing).');
       }
 
       // Check verification snapshot
       if (responseData.verified) {
-        tracker.recordLog(`Pre/Post snapshot verified: +${responseData.appendedCount} rows in sheet`);
+        tracker.recordLog(`Pre/Post snapshot verified: +${responseData.appendedCount || responseData.newRowCount || msg.analysis.rows.length} rows in sheet`);
       }
 
       // 3. Post-verification: Verify Drive files exist
@@ -1067,8 +1362,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
       console.warn('Server sheet append error:', sheetErr);
       tracker.recordLog(`Sheet append failed: ${sheetErr.message}. Initiating compensating rollback of Drive photos.`);
 
-      // COMPENSATING ROLLBACK: Delete newly uploaded Drive photos so Drive and Sheet never get out of sync!
-      if (uploadedDriveFileIds.length > 0) {
+      // COMPENSATING ROLLBACK: Delete newly uploaded Drive photos only for new meals (never purge existing drive photos during review/edit)
+      if (uploadedDriveFileIds.length > 0 && !initialEditingMeal) {
         setSavingStatusMsg(`❌ Sheet append failed. Rolling back ${uploadedDriveFileIds.length} uploaded Drive photos...`);
         try {
           await rollbackUploadedDriveFiles(uploadedDriveFileIds);
@@ -1082,8 +1377,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         setSavingStatusMsg(`❌ Failed: ${sheetErr.message}`);
       }
 
+      setIsSavingMealId(null);
       setTimeout(() => {
-        setIsSavingMealId(null);
         setSavingStatusMsg(null);
       }, 8000);
       return;
@@ -1102,16 +1397,16 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     if (totals.addedSugars > 15) flags.push('⚠️ High Sugar');
 
     const newMeal: LoggedMeal = {
-      id: `meal-${Date.now()}`,
-      mealId: activeMealId,
-      dayKey: 'today',
-      dateStr: photoDateStr || defaultDateStr,
-      mealType: (defaultMealSlot as 'Breakfast' | 'Lunch' | 'Dinner' | 'Snack' | 'Late Night') || 'Breakfast',
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      id: initialEditingMeal?.id || `meal-${Date.now()}`,
+      mealId: initialEditingMeal?.mealId || activeMealId,
+      dayKey: initialEditingMeal?.dayKey || 'today',
+      dateStr: initialEditingMeal?.dateStr || photoDateStr || defaultDateStr,
+      mealType: initialEditingMeal?.mealType || (defaultMealSlot as 'Breakfast' | 'Lunch' | 'Dinner' | 'Snack' | 'Late Night') || 'Breakfast',
+      time: initialEditingMeal?.time || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       foodName: msg.analysis.dishName,
       portion: msg.analysis.rows.map((r) => `${r.ingredient} (${r.weightG}g)`).join(', ') || 'Standard Serving',
-      imageUrl: imageUrl,
-      driveFileName: driveFileName,
+      imageUrl: imageUrl || (initialEditingMeal?.imageUrl || ''),
+      driveFileName: driveFileName || initialEditingMeal?.driveFileName,
       calories: Math.round(totals.calories),
       protein: Math.round(totals.protein * 10) / 10,
       carbs: Math.round(totals.carbs * 10) / 10,
@@ -1258,6 +1553,11 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           <div>
             <h2 className="text-base sm:text-lg font-bold text-white tracking-tight flex items-center gap-2">
               Food & Nutrition Agent
+              {initialEditingMeal && (
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Review & Edit: {initialEditingMeal.mealId}
+                </span>
+              )}
             </h2>
             {/* Model selection dropdown */}
             <div className="relative mt-0.5">
@@ -1997,16 +2297,18 @@ Google Sheet 38 Column Order:
                         );
                       })()}
 
-                      <div className="prose prose-invert prose-xs text-xs text-slate-300 whitespace-pre-line leading-relaxed mb-3">
-                        {msg.analysis.clinicalSummary}
-                      </div>
+                      {msg.analysis.clinicalSummary && (
+                        <div className="prose prose-invert prose-xs text-xs text-slate-300 whitespace-pre-line leading-relaxed mb-3">
+                          {msg.analysis.clinicalSummary}
+                        </div>
+                      )}
 
-                      {/* Meal Diagnosis Box (Row 0 populated) */}
-                      {msg.analysis.mealDiagnosis && (
+                      {/* Meal Diagnosis Box (Row 0 populated) - Rendered when distinct from clinical summary */}
+                      {msg.analysis.mealDiagnosis && msg.analysis.mealDiagnosis !== msg.analysis.clinicalSummary && (
                         <div className="mb-3 bg-[#0D1527] border border-indigo-500/30 rounded-xl p-3 space-y-1">
                           <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-300">
                             <HeartPulse className="w-3.5 h-3.5 text-indigo-400" />
-                            <span>Meal Diagnosis (Populated in Row 0 only)</span>
+                            <span>Meal Diagnosis (Sheets Row 0 Col 39)</span>
                           </div>
                           <p className="text-xs text-slate-200 leading-relaxed font-sans">
                             {msg.analysis.mealDiagnosis}
@@ -2014,12 +2316,14 @@ Google Sheet 38 Column Order:
                         </div>
                       )}
 
-                      {/* Daily Diagnosis Box (Row 0 populated) */}
-                      {msg.analysis.dailyDiagnosis && (
+                      {/* Daily Diagnosis Box (Row 0 populated) - Rendered when distinct */}
+                      {msg.analysis.dailyDiagnosis && 
+                       msg.analysis.dailyDiagnosis !== msg.analysis.clinicalSummary && 
+                       msg.analysis.dailyDiagnosis !== msg.analysis.mealDiagnosis && (
                         <div className="mb-3 bg-[#0C1A24] border border-sky-500/30 rounded-xl p-3 space-y-1">
                           <div className="flex items-center gap-1.5 text-xs font-bold text-sky-300">
                             <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
-                            <span>Daily Diagnosis & Ledger Guidance (Populated in Row 0 only)</span>
+                            <span>Daily Diagnosis & Ledger Guidance (Sheets Row 0 Col 40)</span>
                           </div>
                           <p className="text-xs text-slate-200 leading-relaxed font-sans">
                             {msg.analysis.dailyDiagnosis}
@@ -2087,6 +2391,36 @@ Google Sheet 38 Column Order:
                         </div>
 
                         <div className="flex items-center gap-2">
+                          {/* Layout Toggle: 2-Column Vertical List vs Table View */}
+                          <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => setNutrientViewMode('vertical_2col')}
+                              className={`px-2 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                                nutrientViewMode === 'vertical_2col'
+                                  ? 'bg-indigo-600 text-white shadow-xs'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                              title="Compact 2-column vertical nutrient list"
+                            >
+                              <Columns className="w-3.5 h-3.5" />
+                              <span>2-Col List</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setNutrientViewMode('table')}
+                              className={`px-2 py-0.5 rounded text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                                nutrientViewMode === 'table'
+                                  ? 'bg-indigo-600 text-white shadow-xs'
+                                  : 'text-slate-400 hover:text-slate-200'
+                              }`}
+                              title="Horizontal 38-column spreadsheet table"
+                            >
+                              <Table className="w-3.5 h-3.5" />
+                              <span>Table</span>
+                            </button>
+                          </div>
+
                           <button
                             type="button"
                             onClick={() => handleCopyTSV(msg.analysis!.tsvFormatted, msg.id)}
@@ -2127,17 +2461,17 @@ Google Sheet 38 Column Order:
                             {isSavingMealId === msg.id ? (
                               <>
                                 <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
-                                <span>Saving & Appending...</span>
+                                <span>{initialEditingMeal ? 'Saving & Updating...' : 'Saving & Appending...'}</span>
                               </>
                             ) : msg.isSavedToJournal ? (
                               <>
                                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>Saved to Sheet & Drive</span>
+                                <span>{initialEditingMeal ? 'Saved Edits to Sheet' : 'Saved to Sheet & Drive'}</span>
                               </>
                             ) : (
                               <>
                                 <PlusCircle className="w-3.5 h-3.5" />
-                                <span>Save Meal</span>
+                                <span>{initialEditingMeal ? 'Save Meal Edits' : 'Save Meal'}</span>
                               </>
                             )}
                           </button>
@@ -2169,9 +2503,297 @@ Google Sheet 38 Column Order:
                         </div>
                       </div>
 
-                      {/* Horizontally scrollable 38-column table */}
-                      <div className="overflow-x-auto max-h-72 text-[11px]">
-                        <table className="w-full text-left border-collapse whitespace-nowrap">
+                      {/* 2-Column Vertical Nutrient List View (Default) vs Table View */}
+                      {nutrientViewMode === 'vertical_2col' ? (
+                        <div className="p-3 bg-slate-950/80">
+                          {/* Component tabs if multiple components exist */}
+                          {msg.analysis.rows.length > 1 && (
+                            <div className="flex items-center gap-1.5 mb-3 pb-2.5 border-b border-slate-800/80 overflow-x-auto">
+                              <span className="text-[11px] font-semibold text-slate-400 mr-1 shrink-0">Components:</span>
+                              {msg.analysis.rows.map((row, rIdx) => {
+                                const isSelected = (activeComponentRow[msg.id] ?? 0) === rIdx;
+                                return (
+                                  <button
+                                    key={rIdx}
+                                    type="button"
+                                    onClick={() => setActiveComponentRow((prev) => ({ ...prev, [msg.id]: rIdx }))}
+                                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+                                      isSelected
+                                        ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400'
+                                        : 'bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800'
+                                    }`}
+                                  >
+                                    <span>#{rIdx + 1} {row.ingredient || `Component ${rIdx + 1}`}</span>
+                                    <span className="text-[10px] opacity-80 font-mono">({row.weightG}g)</span>
+                                  </button>
+                                );
+                              })}
+                              {!msg.isSavedToJournal && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleAddAnalysisRow(msg.id)}
+                                  className="px-2 py-1 text-[11px] text-indigo-400 hover:text-indigo-300 hover:bg-indigo-950/50 rounded-lg flex items-center gap-1 border border-dashed border-indigo-700/60 cursor-pointer ml-1 shrink-0"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  <span>Add Row</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Active Component 2-Column Breakdown */}
+                          {(() => {
+                            const activeIdx = Math.min(activeComponentRow[msg.id] ?? 0, msg.analysis.rows.length - 1);
+                            const r = msg.analysis.rows[activeIdx] || msg.analysis.rows[0];
+                            if (!r) return null;
+
+                            const netCarbs = Math.max(0, (Number(r.carbs) || 0) - (Number(r.fiber) || 0));
+
+                            return (
+                              <div className="space-y-3">
+                                {/* Component Context & Editable Details */}
+                                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-xs">
+                                  <div className="flex items-center flex-wrap gap-2.5 min-w-0">
+                                    <span className="px-2 py-0.5 bg-indigo-950 text-indigo-300 border border-indigo-800/80 rounded-md text-[11px] font-bold">
+                                      #{activeIdx + 1}
+                                    </span>
+                                    
+                                    {!msg.isSavedToJournal ? (
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="text"
+                                          value={r.ingredient}
+                                          onChange={(e) => handleUpdateAnalysisRow(msg.id, activeIdx, 'ingredient', e.target.value)}
+                                          placeholder="Component / Ingredient"
+                                          className="bg-slate-950 border border-slate-700 focus:border-indigo-500 rounded-lg px-2.5 py-1 text-xs font-semibold text-white focus:outline-none w-48 sm:w-64 font-sans"
+                                          title="Edit ingredient name"
+                                        />
+                                        <div className="flex items-center gap-1">
+                                          <input
+                                            type="number"
+                                            step="1"
+                                            value={r.weightG}
+                                            onChange={(e) => handleUpdateAnalysisRow(msg.id, activeIdx, 'weightG', Number(e.target.value))}
+                                            className="bg-slate-950 border border-slate-700 focus:border-indigo-500 rounded-lg px-2 py-1 text-xs font-mono text-right text-white focus:outline-none w-20"
+                                            title="Edit weight in grams (auto-scales nutrients)"
+                                          />
+                                          <span className="text-xs text-slate-400 font-mono">g</span>
+                                        </div>
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-sm font-bold text-white">{r.ingredient}</span>
+                                        <span className="text-xs font-mono text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                                          {r.weightG} g
+                                        </span>
+                                      </div>
+                                    )}
+
+                                    {/* Context badges */}
+                                    <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                                      <span className="px-2 py-0.5 bg-slate-950 rounded border border-slate-800 text-slate-300">{r.mealSlot}</span>
+                                      <span className="px-2 py-0.5 bg-slate-950 rounded border border-slate-800 text-slate-300">{r.date}</span>
+                                      <span className="px-2 py-0.5 bg-slate-950 rounded border border-slate-800 text-slate-400">{r.mealId}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Delete Component Button if multiple exist and not saved */}
+                                  {!msg.isSavedToJournal && msg.analysis.rows.length > 1 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        handleDeleteAnalysisRow(msg.id, activeIdx);
+                                        setActiveComponentRow((prev) => ({ ...prev, [msg.id]: Math.max(0, activeIdx - 1) }));
+                                      }}
+                                      className="px-2.5 py-1 bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 hover:text-rose-100 rounded-lg text-xs font-medium flex items-center gap-1.5 border border-rose-800/60 transition-colors cursor-pointer"
+                                      title="Delete this component"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                                      <span>Delete Component</span>
+                                    </button>
+                                  )}
+                                </div>
+
+                                 {/* Quick Macro Summary Strip */}
+                                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center text-xs">
+                                  <div className="bg-amber-950/40 border border-amber-800/50 rounded-lg p-1.5 relative">
+                                    <div className="flex items-center justify-center gap-1 text-[10px] text-amber-400/90 font-medium">
+                                      <span>Calories</span>
+                                      {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], 'calories') && (
+                                        <span className="px-1 py-0.2 text-[8px] font-mono font-bold bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40" title="Scanned from packaging label (OCR)">OCR</span>
+                                      )}
+                                    </div>
+                                    <div className="font-bold text-amber-300 font-mono text-sm">{r.calories} <span className="text-[10px] font-normal">kcal</span></div>
+                                  </div>
+                                  <div className="bg-indigo-950/40 border border-indigo-800/50 rounded-lg p-1.5 relative">
+                                    <div className="flex items-center justify-center gap-1 text-[10px] text-indigo-400/90 font-medium">
+                                      <span>Protein</span>
+                                      {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], 'protein') && (
+                                        <span className="px-1 py-0.2 text-[8px] font-mono font-bold bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40" title="Scanned from packaging label (OCR)">OCR</span>
+                                      )}
+                                    </div>
+                                    <div className="font-bold text-indigo-200 font-mono text-sm">{r.protein} <span className="text-[10px] font-normal">g</span></div>
+                                  </div>
+                                  <div className="bg-yellow-950/40 border border-yellow-800/50 rounded-lg p-1.5 relative">
+                                    <div className="flex items-center justify-center gap-1 text-[10px] text-yellow-400/90 font-medium">
+                                      <span>Total Fat</span>
+                                      {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], 'totalFat') && (
+                                        <span className="px-1 py-0.2 text-[8px] font-mono font-bold bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40" title="Scanned from packaging label (OCR)">OCR</span>
+                                      )}
+                                    </div>
+                                    <div className="font-bold text-yellow-200 font-mono text-sm">{r.totalFat} <span className="text-[10px] font-normal">g</span></div>
+                                  </div>
+                                  <div className="bg-emerald-950/40 border border-emerald-800/50 rounded-lg p-1.5 relative">
+                                    <div className="flex items-center justify-center gap-1 text-[10px] text-emerald-400/90 font-medium">
+                                      <span>Carbs</span>
+                                      {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], 'carbs') && (
+                                        <span className="px-1 py-0.2 text-[8px] font-mono font-bold bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40" title="Scanned from packaging label (OCR)">OCR</span>
+                                      )}
+                                    </div>
+                                    <div className="font-bold text-emerald-200 font-mono text-sm">{r.carbs} <span className="text-[10px] font-normal">g</span></div>
+                                  </div>
+                                  <div className="bg-teal-950/40 border border-teal-800/50 rounded-lg p-1.5 relative">
+                                    <div className="flex items-center justify-center gap-1 text-[10px] text-teal-400/90 font-medium">
+                                      <span>Fiber</span>
+                                      {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], 'fiber') && (
+                                        <span className="px-1 py-0.2 text-[8px] font-mono font-bold bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/40" title="Scanned from packaging label (OCR)">OCR</span>
+                                      )}
+                                    </div>
+                                    <div className="font-bold text-teal-200 font-mono text-sm">{r.fiber} <span className="text-[10px] font-normal">g</span></div>
+                                  </div>
+                                  <div className="bg-sky-950/40 border border-sky-800/50 rounded-lg p-1.5 relative">
+                                    <div className="text-[10px] text-sky-400/90 font-medium">Net Carbs</div>
+                                    <div className="font-bold text-sky-200 font-mono text-sm">{netCarbs.toFixed(1)} <span className="text-[10px] font-normal">g</span></div>
+                                  </div>
+                                </div>
+
+                                {/* 2-Column Vertical Nutrient List */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                  {/* Column 1: Macronutrients, Fats & Carbs */}
+                                  <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 space-y-1">
+                                    <div className="flex items-center justify-between pb-2 mb-1.5 border-b border-slate-800 text-xs font-bold text-indigo-300">
+                                      <div className="flex items-center gap-1.5">
+                                        <Flame className="w-3.5 h-3.5 text-amber-400" />
+                                        <span>Macronutrients & Energy</span>
+                                      </div>
+                                      <span className="text-[10px] text-slate-400 font-normal">Per {r.weightG}g</span>
+                                    </div>
+
+                                    <div className="divide-y divide-slate-800/50">
+                                      {MACRO_NUTRIENT_FIELDS.map((field) => (
+                                        <div key={field.key} className="flex items-center justify-between py-1.5 px-2 hover:bg-slate-800/40 rounded transition-colors text-xs">
+                                          <div className="flex items-center gap-1.5 min-w-0">
+                                            <span className="text-slate-300 font-medium truncate">{field.label}</span>
+                                            {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], field.key as string) && (
+                                              <span
+                                                className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[8px] font-mono font-bold bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 tracking-wider shrink-0 shadow-sm"
+                                                title="Verified printed value from packaging Nutrition Facts label (OCR)"
+                                              >
+                                                <Scan className="w-2.5 h-2.5 text-emerald-400 shrink-0" />
+                                                OCR
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="flex items-center gap-1.5">
+                                            {!msg.isSavedToJournal ? (
+                                              <input
+                                                type="number"
+                                                step={field.step}
+                                                value={r[field.key] as number}
+                                                onChange={(e) => handleUpdateAnalysisRow(msg.id, activeIdx, field.key, Number(e.target.value))}
+                                                className={`bg-slate-950 border border-slate-700/80 focus:border-indigo-500 rounded px-2 py-0.5 text-xs text-right font-mono focus:outline-none w-20 ${field.color || 'text-slate-200'}`}
+                                              />
+                                            ) : (
+                                              <span className={`font-mono text-xs font-semibold ${field.color || 'text-slate-200'}`}>
+                                                {r[field.key] as number}
+                                              </span>
+                                            )}
+                                            <span className="text-slate-400 text-[10px] w-10 text-left font-mono">{field.unit}</span>
+                                          </div>
+                                        </div>
+                                      ))}
+
+                                      {/* Net Carbs calculated display row */}
+                                      <div className="flex items-center justify-between py-1.5 px-2 bg-sky-950/30 rounded text-xs">
+                                        <span className="text-sky-300 font-semibold">Net Carbohydrates</span>
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="font-mono text-xs font-bold text-sky-200">{netCarbs.toFixed(1)}</span>
+                                          <span className="text-sky-400 text-[10px] w-10 text-left font-mono">g</span>
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    {/* Source Reference at bottom of Column 1 */}
+                                    <div className="pt-2 mt-2 border-t border-slate-800 flex items-center justify-between text-xs px-2">
+                                      <span className="text-slate-400 text-[11px] font-medium">Source / Reference:</span>
+                                      {!msg.isSavedToJournal ? (
+                                        <input
+                                          type="text"
+                                          value={r.sourceRef || ''}
+                                          onChange={(e) => handleUpdateAnalysisRow(msg.id, activeIdx, 'sourceRef', e.target.value)}
+                                          placeholder="e.g. USDA FDC #170567"
+                                          className="bg-slate-950 border border-slate-700/80 focus:border-indigo-500 rounded px-2 py-0.5 text-xs text-right text-slate-300 focus:outline-none w-44 font-sans"
+                                        />
+                                      ) : (
+                                        <span className="text-slate-400 text-[11px] truncate max-w-[180px] font-mono">{r.sourceRef || 'Computed Engine'}</span>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Column 2: Micronutrients (Minerals & Vitamins) */}
+                                  <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-3 space-y-1">
+                                    <div className="flex items-center justify-between pb-2 mb-1.5 border-b border-slate-800 text-xs font-bold text-emerald-300">
+                                      <div className="flex items-center gap-1.5">
+                                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                                        <span>Micronutrients (Minerals & Vitamins)</span>
+                                      </div>
+                                      <span className="text-[10px] text-slate-400 font-normal">Per {r.weightG}g</span>
+                                    </div>
+
+                                    <div className="divide-y divide-slate-800/50">
+                                      {MICRO_NUTRIENT_FIELDS.map((field) => (
+                                        <div key={field.key} className="flex items-center justify-between py-1.5 px-2 hover:bg-slate-800/40 rounded transition-colors text-xs">
+                                          <div className="flex items-center gap-1.5 min-w-0">
+                                            <span className="text-slate-300 font-medium truncate">{field.label}</span>
+                                            {isNutrientFromOcr(r, msg.analysis.foods?.[activeIdx], field.key as string) && (
+                                              <span
+                                                className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[8px] font-mono font-bold bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 tracking-wider shrink-0 shadow-sm"
+                                                title="Verified printed value from packaging Nutrition Facts label (OCR)"
+                                              >
+                                                <Scan className="w-2.5 h-2.5 text-emerald-400 shrink-0" />
+                                                OCR
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="flex items-center gap-1.5">
+                                            {!msg.isSavedToJournal ? (
+                                              <input
+                                                type="number"
+                                                step={field.step}
+                                                value={r[field.key] as number}
+                                                onChange={(e) => handleUpdateAnalysisRow(msg.id, activeIdx, field.key, Number(e.target.value))}
+                                                className={`bg-slate-950 border border-slate-700/80 focus:border-indigo-500 rounded px-2 py-0.5 text-xs text-right font-mono focus:outline-none w-20 ${field.color || 'text-slate-200'}`}
+                                              />
+                                            ) : (
+                                              <span className={`font-mono text-xs font-semibold ${field.color || 'text-slate-200'}`}>
+                                                {r[field.key] as number}
+                                              </span>
+                                            )}
+                                            <span className="text-slate-400 text-[10px] w-14 text-left font-mono">{field.unit}</span>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      ) : (
+                        /* Horizontally scrollable 38-column table */
+                        <div className="overflow-x-auto max-h-72 text-[11px]">
+                          <table className="w-full text-left border-collapse whitespace-nowrap">
                           <thead className="bg-slate-900/95 sticky top-0 border-b border-slate-800 text-slate-300 font-semibold">
                             <tr>
                               <th className="p-2 border-r border-slate-800 text-center w-12">Action</th>
@@ -2333,6 +2955,7 @@ Google Sheet 38 Column Order:
                           </tbody>
                         </table>
                       </div>
+                      )}
 
                       {/* Raw TSV view when toggled */}
                       {showRawTSVView && (

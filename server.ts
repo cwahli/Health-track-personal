@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { getDailyNutrientLedger } from './src/utils/dashboardFoodLedger';
+import { processFoodsAnalysis, FoodItemInput } from './src/utils/nutritionEngine';
 
 const __filename = fileURLToPath(import.meta?.url || 'file://' + process.cwd() + '/server.ts');
 const __dirname = path.dirname(__filename);
@@ -606,6 +607,22 @@ function extractGoogleSpreadsheetId(url: string): string | null {
   return null;
 }
 
+// Helper to extract Google Drive file ID from URL or formula
+function extractDriveFileId(url: string): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  const fileDMatch = trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (fileDMatch && fileDMatch[1]) return fileDMatch[1];
+  const idParamMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (idParamMatch && idParamMatch[1]) return idParamMatch[1];
+  const lh3Match = trimmed.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if (lh3Match && lh3Match[1]) return lh3Match[1];
+  const formulaMatch = trimmed.match(/HYPERLINK\s*\(\s*["']([^"']+)["']/i);
+  if (formulaMatch && formulaMatch[1]) return extractDriveFileId(formulaMatch[1]);
+  if (/^1[a-zA-Z0-9_-]{27,45}$/.test(trimmed)) return trimmed;
+  return null;
+}
+
 // 2.4 Fetch Day Consumed Nutrients ("dashboard-food" tab) for Agent Context
 app.get('/api/sheets/daily-nutrients', async (req, res) => {
   try {
@@ -874,6 +891,8 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
     if (!spreadsheetId || !accessToken) {
       return res.json({
         success: true,
+        googleSheetsAppended: false,
+        googleSheetsEdited: false,
         mealId,
         oldRowCount: 0,
         newRowCount: newRows.length,
@@ -989,7 +1008,7 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
         r.sourceRef || 'USDA FDC Reference',
         idx === 0 ? (r.mealDiagnosis || '') : '',
         idx === 0 ? (r.dailyDiagnosis || '') : '',
-        r.photoUrl || '',
+        r.photoUrl || (oldPhotoUrls.length > 0 ? oldPhotoUrls.join(', ') : ''),
       ]);
 
       const rangeParamAppend = encodeURIComponent(`'${exactTabName}'!A:AO`);
@@ -1024,6 +1043,9 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
 
       return res.json({
         success: true,
+        googleSheetsAppended: true,
+        googleSheetsEdited: true,
+        appendedCount: newRows.length,
         mealId,
         oldRowCount: matchingRowIndices.length,
         newRowCount: newRows.length,
@@ -1039,6 +1061,9 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
     console.warn('Error in edit-meal-log:', error);
     return res.status(500).json({
       success: false,
+      googleSheetsAppended: false,
+      googleSheetsEdited: false,
+      googleSheetError: error.message || 'Failed to edit meal log rows',
       error: error.message || 'Failed to edit meal log rows',
     });
   }
@@ -1424,6 +1449,7 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
     patientContext,
     dailyNutrientsContext,
     existingAnalysis,
+    isEditMode,
   } = req.body;
 
   try {
@@ -1561,7 +1587,8 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
         };
 
         const totalWeight = updatedRows.reduce((sum: number, r: any) => sum + (Number(r.weightG) || 0), 0);
-        const atwaterSum = Math.round(agg.protein * 4 + agg.carbs * 4 + agg.totalFat * 9 + agg.fiber * 2);
+        const netCarb = Math.max(0, agg.carbs - agg.fiber);
+        const atwaterSum = Math.round(agg.protein * 4 + netCarb * 4 + agg.totalFat * 9 + agg.fiber * 2);
         const atwaterDiff = Math.abs(agg.calories - atwaterSum);
 
         const targetName = targetRow.dishName || targetRow.ingredient;
@@ -1801,8 +1828,23 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
     const contents: any[] = [];
 
     if (Array.isArray(images) && images.length > 0) {
-      images.forEach((img: any) => {
-        const raw = img.base64 || img.data || '';
+      for (const img of images) {
+        let raw = img.base64 || img.data || '';
+        if (!raw && img.url) {
+          try {
+            const fId = extractDriveFileId(img.url);
+            const fetchUrl = fId ? `https://lh3.googleusercontent.com/d/${fId}=w1000` : img.url;
+            if (fetchUrl.startsWith('http')) {
+              const fetchRes = await fetch(fetchUrl);
+              if (fetchRes.ok) {
+                const buf = Buffer.from(await fetchRes.arrayBuffer());
+                raw = buf.toString('base64');
+              }
+            }
+          } catch (fetchErr) {
+            console.warn('Could not fetch image from URL for Gemini:', img.url, fetchErr);
+          }
+        }
         const cleanBase64 = raw.replace(/^data:image\/[a-z]+;base64,/, '');
         if (cleanBase64) {
           contents.push({
@@ -1812,7 +1854,7 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
             },
           });
         }
-      });
+      }
     } else if (imageBase64) {
       const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
       contents.push({
@@ -1823,48 +1865,51 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
       });
     }
 
+    const editPromptInstruction = isEditMode
+      ? `\nCRITICAL MEAL EDIT & REVIEW INSTRUCTIONS:
+- You are reviewing and EDITING an already logged meal (${mealId} - ${mealSlot} on ${dateStr}).
+- User Edit Instructions: "${userMessage || 'Re-evaluate with original photos and instructions'}"
+- Prior Meal Components Context: ${existingAnalysis ? JSON.stringify(existingAnalysis) : 'N/A'}
+- Re-evaluate all attached original photos according to the user's specific edit instructions.
+- Ensure updated weights, components, and nutrients accurately reflect both the physical images and the user's instruction.
+`
+      : '';
+
     const promptText = `You are an elite Clinical Nutritionist and AI Dietitian reviewing 1 or more meal photos and notes.
+${editPromptInstruction}
+CORE DIRECTIVES:
+A. PROVIDE ALL NUTRITIONS: The user's clinical dashboard tracks all 33 nutrients (calories, protein, totalFat, saturatedFat, monounsaturatedFat, polyunsaturatedFat, transFat, cholesterol, totalCarbohydrate, dietaryFiber, totalSugars, addedSugars, sodium, potassium, calcium, iron, magnesium, phosphorus, zinc, selenium, vitaminA, vitaminC, vitaminD, vitaminE, vitaminK, thiaminB1, riboflavinB2, niacinB3, vitaminB6, folate, vitaminB12). No nutrient should be left unknown or omitted.
+B. DO NOT REPEAT YOURSELF:
+   1. In "nutrients": NEVER duplicate or repeat any nutrient that was already declared with a valid printed number in "rawNutritionLabel".
+   2. In diagnoses: NEVER repeat sentences or thoughts between "mealDiagnosis", "dailyDiagnosis", and "clinicalSummary".
 
-CRITICAL INSTRUCTIONS:
-1. OPTICAL CHARACTER RECOGNITION (OCR) PRECEDENCE:
-   If any photo contains a packaged food product, Nutrition Facts label, barcode panel, or restaurant nutritional insert, perform direct OCR extraction and prioritize the exact printed gram weights, calories, and nutrient amounts.
-2. MULTI-PHOTO SYNTHESIS:
-   Combine items from all provided images into a single cohesive meal breakdown with individual component ingredients.
-3. ZERO-DUPLICATION RULE (GOOGLE SHEET MANDATE):
-   - Provide a clinical evaluation for the meal in "mealDiagnosis".
-   - Provide an evaluation of how this meal impacts the patient's daily total in "dailyDiagnosis".
-   - In the "rows" array:
-     - ROW 0 (the first ingredient) MUST include "mealDiagnosis" and "dailyDiagnosis".
-     - ROWS 1 to N MUST have "mealDiagnosis": "" and "dailyDiagnosis": "".
-     - Do NOT duplicate diagnostic text on multiple rows!
-4. THERMODYNAMIC CONSISTENCY (ATWATER SUM):
-   - Atwater macro energy: (4 * Protein) + (4 * Carbs) + (9 * Total Fat) + (2 * Fiber).
-   - The reported total Calories must be mathematically consistent with Atwater macros (within 5% margin of error).
-5. DAILY NUTRIENT CONTEXT (CURRENT DAY'S INTAKE FROM "dashboard-food"):
+DETAILED SPECIFICATIONS:
+1. OPTICAL CHARACTER RECOGNITION (OCR) & PACKAGING EXTRACTION:
+   If any photo contains a packaged food product, Nutrition Facts label, barcode panel, or printed nutrition statement:
+   - Extract the printed packaging title/brand into "packageLabelText".
+   - Extract the EXACT printed nutrition values into "rawNutritionLabel" verbatim with their printed units (e.g. "servingSize": "27 g", "calories": "180 kkal", "sodium": "10 mg", "sugar": "3 g", "protein": "6 g", "totalFat": "15 g", "saturatedFat": "1 g", "totalCarbohydrate": "8 g", "totalFibre": "3 g").
+   - If a specific nutrient is NOT printed on the label (e.g. potassium, calcium, iron, cholesterol, vitamins), leave its value in "rawNutritionLabel" as null.
+
+2. COMPLETE ALL REMAINING NUTRIENTS IN "nutrients" WITHOUT REPEATING:
+   - In "nutrients", DO NOT repeat any nutrient already declared on "rawNutritionLabel".
+   - In "nutrients", you MUST provide estimated values for ALL missing, unlisted, or null nutrients from the 33-nutrient schema based on standard USDA FoodData Central reference for this food (e.g. for roasted almonds, provide monounsaturatedFat, polyunsaturatedFat, transFat, cholesterol, addedSugars, potassium, calcium, iron, magnesium, phosphorus, zinc, selenium, vitaminA, vitaminC, vitaminD, vitaminE, vitaminK, thiaminB1, riboflavinB2, niacinB3, vitaminB6, folate, vitaminB12) estimated for the consumed "weightGrams".
+   - If a food naturally contains 0 or negligible amounts (e.g. vitamin D in plain almonds is 0, cholesterol in plants is 0), set it to 0. But for nutrients the food is known to contain (e.g. almonds are rich in potassium, calcium, iron, magnesium, phosphorus, riboflavin, vitamin E, monounsaturated fats), provide the realistic estimated quantities!
+
+3. RESTAURANT / HOME-COOKED MEALS (NO PRINTED LABEL):
+   - Set "rawNutritionLabel": null.
+   - In "nutrients", provide all 33 estimated macro and micronutrients for the food's consumed portion ("weightGrams") using USDA FoodData Central reference.
+
+4. CLINICAL DIAGNOSES & NARRATIVE (STRICT ZERO REPETITION):
+   - "mealDiagnosis": Exactly 1 concise sentence focusing strictly on this meal's nutritional density, portion balance, and glycemic/lipid quality (for Google Sheets Col 39).
+   - "dailyDiagnosis": Exactly 1 concise sentence evaluating the cumulative daily ledger totals (especially sodium limit proximity, caloric deficit, or protein target) and guiding the next meal (for Google Sheets Col 40). DO NOT repeat the meal description.
+   - "clinicalSummary": 2-3 sentences of overall clinical dietitian takeaway coaching. Synthesize actionable advice without repeating verbatim the sentences from mealDiagnosis or dailyDiagnosis.
+
+5. MULTI-PHOTO SYNTHESIS:
+   Combine all foods/ingredients detected across all images into the "foods" array.
+
+6. DAILY NUTRIENT CONTEXT (CURRENT DAY'S INTAKE FROM "dashboard-food"):
 ${resolvedDailyLedger}
-6. TOTAL DISH WEIGHT VS. PORTION WEIGHT SPECIFICATION (CRITICAL PRECISION MANDATE):
-   - "totalDishWeightG": The entire prepared dish weight or the FULL NET PACKAGE WEIGHT printed on the package (e.g., if you see a bag that says "690g", you MUST output 690 here, DO NOT just sum the portions).
-   - "portionWeightG": The actual portion size consumed or estimated single serving (e.g., 30g serving from a 690g pack, or half a 200g bowl).
-   - "weightDifferenceDetected": Boolean. You MUST set this to true if the visual package net weight differs from the portion size (e.g., bag says 690g, but portion is 30g).
-   - "weightClarificationPrompt": If weightDifferenceDetected is true, ask the user to confirm their exact consumed amount. Example: "I detected a 690g package weight but a 30g single serving portion. Did you consume the entire 690g package, just 30g, or a different amount?"
 
-7. ROW-LEVEL DISH NAMES:
-   - For the "dishName" inside each individual row, you MUST use the specific name of that item (e.g., "Quaker Instant Oatmeal", "Dry Roasted Peanuts"). DO NOT just copy the top-level combined dishName into every row.
-
-${existingAnalysis && existingAnalysis.rows && existingAnalysis.rows.length > 0 ? `8. MULTI-TURN EXISTING MEAL ADJUSTMENT (STRICT TARGETING MANDATE):
-The user is adjusting an existing meal analysis.
-CURRENT EXISTING BREAKDOWN:
-${JSON.stringify(existingAnalysis.rows, null, 2)}
-
-USER ADJUSTMENT INSTRUCTION: "${userMessage}"
-
-CRITICAL MANDATES FOR ADJUSTING THIS MEAL:
-- If the user specifies an adjustment to a specific ingredient/component (e.g. "set the weight for quaker to 200", "quaker to 200g", "adjust oatmeal to 200g"):
-  1. ONLY update that specific ingredient's row (e.g., Quaker Instant Oatmeal weightG becomes 200).
-  2. Scale that specific ingredient's calories and all 33 nutrients proportionately using ratio: (newWeight / oldWeight).
-  3. ABSOLUTELY DO NOT MODIFY ANY OTHER INGREDIENT ROWS. For example, Dry Roasted Peanuts MUST stay at its EXACT original weight and exact nutrient values. DO NOT redistribute, equalize, or alter untouched ingredients!
-  4. Recalculate aggregatedTotals, Atwater consistency, mealDiagnosis, and dailyDiagnosis based on the sum of the updated row + untouched rows.
-` : ''}
 Context:
 Meal ID: ${mealId}
 Meal Slot: ${mealSlot}
@@ -1877,82 +1922,45 @@ Patient Clinical Baseline: ${JSON.stringify(patientContext || {
   hba1c: '40 mmol/mol (Pre-diabetic threshold, added sugars <20g)',
 })}
 
-Google Sheet 38 Component Column Order:
-1. Dish Name, 2. Meal ID, 3. Date, 4. Meal Slot, 5. Ingredient / Component,
-6. Weight (g), 7. Calories (kcal), 8. Protein (g), 9. Total Fat (g), 10. Saturated Fat (g),
-11. Carbohydrates (g), 12. Dietary Fiber (g), 13. Total Sugars (g), 14. Sodium (mg),
-15. Potassium (mg), 16. Calcium (mg), 17. Iron (mg), 18. Magnesium (mg), 19. Phosphorus (mg),
-20. Zinc (mg), 21. Selenium (mcg), 22. Vitamin A (mcg RAE), 23. Vitamin C (mg), 24. Vitamin D (mcg),
-25. Vitamin E (mg), 26. Vitamin K (mcg), 27. Vitamin B12 (mcg), 28. Folate (mcg DFE),
-29. Vitamin B6 (mg), 30. Thiamin B1 (mg), 31. Riboflavin B2 (mg), 32. Niacin B3 (mg NE),
-33. Monounsaturated Fat (g), 34. Polyunsaturated Fat (g), 35. Trans Fat (g), 36. Cholesterol (mg),
-37. Added Sugars (g), 38. USDA / Source Reference
-
-Output ONLY valid JSON with this exact schema:
+Output ONLY valid JSON with this exact concise schema:
 {
   "dishName": string,
-  "totalDishWeightG": number,
-  "portionWeightG": number,
-  "weightDifferenceDetected": boolean,
-  "weightClarificationPrompt": string,
-  "mealDiagnosis": string (Clinical diagnosis of this meal alone),
-  "dailyDiagnosis": string (Clinical evaluation of this meal added to the day's dashboard-food ledger towards targets),
-  "clinicalSummary": string (Markdown with ## Health Benefits, ## Clinical Assessment, ## Dietary Guidance),
-  "rows": [
+  "mealDiagnosis": string,
+  "dailyDiagnosis": string,
+  "clinicalSummary": string,
+  "foods": [
     {
-      "dishName": string,
-      "mealId": string,
-      "date": string,
-      "mealSlot": string,
-      "ingredient": string,
-      "weightG": number,
-      "calories": number,
-      "protein": number,
-      "totalFat": number,
-      "saturatedFat": number,
-      "carbs": number,
-      "fiber": number,
-      "totalSugars": number,
-      "sodium": number,
-      "potassium": number,
-      "calcium": number,
-      "iron": number,
-      "magnesium": number,
-      "phosphorus": number,
-      "zinc": number,
-      "selenium": number,
-      "vitaminA": number,
-      "vitaminC": number,
-      "vitaminD": number,
-      "vitaminE": number,
-      "vitaminK": number,
-      "vitaminB12": number,
-      "folate": number,
-      "vitaminB6": number,
-      "thiaminB1": number,
-      "riboflavinB2": number,
-      "niacinB3": number,
-      "monounsaturatedFat": number,
-      "polyunsaturatedFat": number,
-      "transFat": number,
-      "cholesterol": number,
-      "addedSugars": number,
-      "sourceRef": string,
-      "mealDiagnosis": string,
-      "dailyDiagnosis": string
+      "foodName": string (e.g. "Indomaret Premium Selection Roasted Almond" or "Grilled Salmon"),
+      "genericEnglishName": string (e.g. "roasted almonds" or "salmon fillet"),
+      "packageLabelText": string or null (verbatim packaging title/net weight if packaged, null if restaurant),
+      "weightGrams": number (consumed portion weight in grams),
+      "packGrams": number (total package weight in grams if packaged, or portion weight),
+      "sourceImageIndex": number (0-based index of source image),
+      "rawNutritionLabel": {
+        "servingSize": string,
+        "calories": string,
+        "energyKj": string,
+        "protein": string,
+        "totalFat": string,
+        "saturatedFat": string,
+        "transFat": string,
+        "totalCarbohydrate": string,
+        "sugar": string,
+        "addedSugar": string,
+        "totalFibre": string,
+        "sodium": string,
+        "salt": string,
+        "potassium": string,
+        "calcium": string,
+        "iron": string
+      } or null,
+      "nutrients": {
+        // Provide unlisted nutrients for weightGrams from the 33-nutrient schema not already declared in rawNutritionLabel:
+        // monounsaturatedFat, polyunsaturatedFat, transFat, cholesterol, addedSugars, potassium, calcium, iron, magnesium, phosphorus, zinc, selenium, vitaminA, vitaminC, vitaminD, vitaminE, vitaminK, thiaminB1, riboflavinB2, niacinB3, vitaminB6, folate, vitaminB12.
+        // DO NOT repeat any nutrient already declared on rawNutritionLabel!
+      }
     }
-  ],
-  "aggregatedTotals": {
-    "calories": number,
-    "protein": number,
-    "totalFat": number,
-    "saturatedFat": number,
-    "carbs": number,
-    "fiber": number,
-    "sodium": number,
-    "potassium": number,
-    "addedSugars": number
-  }
+  ]
 }`;
 
     contents.push({ text: promptText });
@@ -1966,46 +1974,102 @@ Output ONLY valid JSON with this exact schema:
     });
 
     const parsed = JSON.parse(response.text || '{}');
-    const rawRows = parsed.rows || [];
-    const mealDiag = parsed.mealDiagnosis || rawRows[0]?.mealDiagnosis || 'Meal analyzed against clinical targets.';
-    const dailyDiag = parsed.dailyDiagnosis || rawRows[0]?.dailyDiagnosis || 'Daily nutrient progression evaluated against dashboard targets.';
+    const mealDiag = parsed.mealDiagnosis || 'Meal analyzed against clinical targets.';
+    const dailyDiag = parsed.dailyDiagnosis || 'Daily nutrient progression evaluated against dashboard targets.';
+    const clinicalSummary = parsed.clinicalSummary || '';
 
-    // Enforce Zero-Duplication strictly in backend
-    const sanitizedRows = rawRows.map((r: any, idx: number) => ({
-      ...r,
-      dishName: r.dishName || parsed.dishName || 'Analyzed Meal',
-      mealId: r.mealId || mealId,
-      date: r.date || dateStr,
-      mealSlot: r.mealSlot || mealSlot,
-      mealDiagnosis: idx === 0 ? mealDiag : '',
-      dailyDiagnosis: idx === 0 ? dailyDiag : '',
-      photoUrl: r.photoUrl || '',
-    }));
+    let sanitizedRows: any[] = [];
+    let aggregatedTotals: any;
+    let atwaterEvaluation: any;
+    let totalDishWeightG = Number(parsed.totalDishWeightG) || 0;
+    let portionWeightG = Number(parsed.portionWeightG) || 0;
+    let weightDifferenceDetected = Boolean(parsed.weightDifferenceDetected);
+    let weightClarificationPrompt = parsed.weightClarificationPrompt || '';
 
-    // Thermodynamic validation calculation
-    const totalProt = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.protein) || 0), 0);
-    const totalCarb = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.carbs) || 0), 0);
-    const totalFat = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.totalFat) || 0), 0);
-    const totalFiber = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.fiber) || 0), 0);
-    const totalWeight = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.weightG) || 0), 0);
-    const totalKcal = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.calories) || 0), 0);
-    const atwaterSum = Math.round((4 * totalProt) + (4 * totalCarb) + (9 * totalFat) + (2 * totalFiber));
-    const atwaterDiff = Math.abs(totalKcal - atwaterSum);
-    const caloricDensity = totalWeight > 0 ? Number((totalKcal / totalWeight).toFixed(2)) : 0;
-    const withinTolerance = totalKcal > 0 ? (atwaterDiff / totalKcal) <= 0.08 : true;
+    if (Array.isArray(parsed.foods) && parsed.foods.length > 0) {
+      // Deterministic processing through the Universal Nutrition Engine
+      const engineResult = processFoodsAnalysis(
+        parsed.dishName || 'Analyzed Meal',
+        parsed.foods,
+        { mealId, date: dateStr, mealSlot }
+      );
 
-    // Weight difference assessment
-    const totalDishWeightG = Number(parsed.totalDishWeightG) || totalWeight || 0;
-    const portionWeightG = Number(parsed.portionWeightG) || totalWeight || 0;
-    const weightDifferenceDetected = Boolean(
-      parsed.weightDifferenceDetected ||
-      (totalDishWeightG > 0 && portionWeightG > 0 && Math.abs(totalDishWeightG - portionWeightG) > 5)
-    );
-    const weightClarificationPrompt = parsed.weightClarificationPrompt || (
-      weightDifferenceDetected
-        ? `I detected a difference between the total dish/package weight (${totalDishWeightG}g) and the estimated portion size (${portionWeightG}g). Did you consume the entire package (${totalDishWeightG}g) or the portion (${portionWeightG}g)?`
-        : ''
-    );
+      // Enforce zero-duplication for clinical diagnosis columns (Row 0 only)
+      sanitizedRows = engineResult.rows.map((r: any, idx: number) => ({
+        ...r,
+        mealDiagnosis: idx === 0 ? mealDiag : '',
+        dailyDiagnosis: idx === 0 ? dailyDiag : '',
+        photoUrl: r.photoUrl || '',
+      }));
+
+      aggregatedTotals = engineResult.aggregatedTotals;
+      atwaterEvaluation = engineResult.atwaterEvaluation;
+      totalDishWeightG = engineResult.totalDishWeightG;
+      portionWeightG = engineResult.portionWeightG;
+      weightDifferenceDetected = engineResult.weightDifferenceDetected;
+      weightClarificationPrompt = engineResult.weightClarificationPrompt || '';
+    } else {
+      // Backward-compatible fallback for legacy row format
+      const rawRows = parsed.rows || [];
+      sanitizedRows = rawRows.map((r: any, idx: number) => ({
+        ...r,
+        dishName: r.dishName || parsed.dishName || 'Analyzed Meal',
+        mealId: r.mealId || mealId,
+        date: r.date || dateStr,
+        mealSlot: r.mealSlot || mealSlot,
+        mealDiagnosis: idx === 0 ? mealDiag : '',
+        dailyDiagnosis: idx === 0 ? dailyDiag : '',
+        photoUrl: r.photoUrl || '',
+      }));
+
+      const totalProt = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.protein) || 0), 0);
+      const totalCarb = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.carbs) || 0), 0);
+      const totalFat = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.totalFat) || 0), 0);
+      const totalFiber = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.fiber) || 0), 0);
+      const totalWeight = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.weightG) || 0), 0);
+      const totalKcal = sanitizedRows.reduce((s: number, r: any) => s + (Number(r.calories) || 0), 0);
+      const netCarb = Math.max(0, totalCarb - totalFiber);
+      const atwaterSum = Math.round((4 * totalProt) + (4 * netCarb) + (9 * totalFat) + (2 * totalFiber));
+      const atwaterDiff = Math.abs(totalKcal - atwaterSum);
+      const caloricDensity = totalWeight > 0 ? Number((totalKcal / totalWeight).toFixed(2)) : 0;
+      const withinTolerance = totalKcal > 0 ? atwaterDiff <= Math.max(30, totalKcal * 0.08) : true;
+
+      totalDishWeightG = Number(parsed.totalDishWeightG) || totalWeight || 0;
+      portionWeightG = Number(parsed.portionWeightG) || totalWeight || 0;
+      weightDifferenceDetected = Boolean(
+        parsed.weightDifferenceDetected ||
+        (totalDishWeightG > 0 && portionWeightG > 0 && Math.abs(totalDishWeightG - portionWeightG) > 5)
+      );
+      weightClarificationPrompt = parsed.weightClarificationPrompt || (
+        weightDifferenceDetected
+          ? `I detected a difference between total package weight (${totalDishWeightG}g) and portion size (${portionWeightG}g). Did you consume the entire package (${totalDishWeightG}g) or the portion (${portionWeightG}g)?`
+          : ''
+      );
+
+      aggregatedTotals = {
+        calories: totalKcal,
+        protein: Number(totalProt.toFixed(1)),
+        totalFat: Number(totalFat.toFixed(1)),
+        saturatedFat: Number(sanitizedRows.reduce((s: number, r: any) => s + (Number(r.saturatedFat) || 0), 0).toFixed(1)),
+        carbs: Number(totalCarb.toFixed(1)),
+        fiber: Number(totalFiber.toFixed(1)),
+        sodium: Math.round(sanitizedRows.reduce((s: number, r: any) => s + (Number(r.sodium) || 0), 0)),
+        potassium: Math.round(sanitizedRows.reduce((s: number, r: any) => s + (Number(r.potassium) || 0), 0)),
+        addedSugars: Number(sanitizedRows.reduce((s: number, r: any) => s + (Number(r.addedSugars) || 0), 0).toFixed(1)),
+      };
+
+      atwaterEvaluation = {
+        totalWeightG: totalWeight,
+        calories: totalKcal,
+        protein: totalProt,
+        carbs: totalCarb,
+        fat: totalFat,
+        atwaterSum,
+        atwaterDiff,
+        caloricDensity,
+        withinTolerance,
+      };
+    }
 
     // Build standard TSV text
     const tsvLines = [
@@ -2056,7 +2120,9 @@ Output ONLY valid JSON with this exact schema:
     ].join('\n');
 
     return res.json({
-      ...parsed,
+      dishName: parsed.dishName || 'Analyzed Meal',
+      foods: parsed.foods || [],
+      rawModelEmission: response.text || '',
       totalDishWeightG,
       portionWeightG,
       weightDifferenceDetected,
@@ -2064,19 +2130,11 @@ Output ONLY valid JSON with this exact schema:
       rows: sanitizedRows,
       mealDiagnosis: mealDiag,
       dailyDiagnosis: dailyDiag,
+      clinicalSummary,
       columnHeaders,
       tsvFormatted: tsvLines,
-      atwaterEvaluation: {
-        totalWeightG: totalWeight,
-        calories: totalKcal,
-        protein: totalProt,
-        carbs: totalCarb,
-        fat: totalFat,
-        atwaterSum,
-        atwaterDiff,
-        caloricDensity,
-        withinTolerance,
-      },
+      aggregatedTotals,
+      atwaterEvaluation,
       modelUsed: preferredModel,
     });
   } catch (error: any) {

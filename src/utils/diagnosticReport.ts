@@ -284,10 +284,12 @@ export class DiagnosticTracker {
     agentMessage?: string;
   }) {
     const fiber = data.fiber || 0;
-    const atwaterSum = Math.round(data.protein * 4 + data.carbs * 4 + data.fat * 9 + fiber * 2);
+    const netCarbs = Math.max(0, data.carbs - fiber);
+    const atwaterSum = Math.round(data.protein * 4 + netCarbs * 4 + data.fat * 9 + fiber * 2);
     const caloricDensity = data.totalWeightG > 0 ? Number((data.calories / data.totalWeightG).toFixed(2)) : 0;
     const atwaterDiff = Math.abs(data.calories - atwaterSum);
-    const passed = caloricDensity >= 0.1 && caloricDensity <= 5.0 && atwaterDiff <= Math.max(15, data.calories * 0.08);
+    // Energy-dense whole foods like nuts, seeds, and oils range up to 9.0 kcal/g. Atwater tolerance accounts for rounding & fiber.
+    const passed = caloricDensity >= 0.1 && caloricDensity <= 9.0 && atwaterDiff <= Math.max(30, data.calories * 0.08);
 
     this.data.modalSnapshot.title = data.dishName;
     this.data.modalSnapshot.onCard = {
@@ -327,6 +329,20 @@ export class DiagnosticTracker {
     const photoLines = d.photoUrls.length > 0
       ? d.photoUrls.map((url, i) => `- **Photo ${i + 1}:** ${url}`).join('\n')
       : '- **Photo 1:** (No remote photo URL yet uploaded / inline data preview)';
+
+    // Keep Atwater contract row strictly in sync with live gateResult
+    const atwaterLaw = d.contractEvaluations.find((c) => c.law.includes('Atwater'));
+    if (atwaterLaw) {
+      if (d.gateResult.passed) {
+        atwaterLaw.result = '✅ PASS';
+        atwaterLaw.fault = 'none';
+        atwaterLaw.actual = `Macro sum matches reported kcal within thermodynamic tolerance (${d.gateResult.atwaterDiff} kcal delta)`;
+      } else {
+        atwaterLaw.result = '❌ FAIL';
+        atwaterLaw.fault = 'thermodynamic_delta';
+        atwaterLaw.actual = `Macro sum deviates by ${d.gateResult.atwaterDiff} kcal from reported kcal`;
+      }
+    }
 
     const contractRows = d.contractEvaluations
       .map((c) => `| ${c.law} | ${c.layer} | ${c.fault} | ${c.result} | ${c.actual} |`)
@@ -439,7 +455,7 @@ ${dispatchesSection || '_No dispatches recorded in this session._'}
 | **3. Biomarker Ingest & Mapping** | ✅ Connected (Target Loaded) | Ingested baseline from dashboard-food |
 | **4. Database Search & Truth Matching** | ✅ Connected (USDA Reference) | USDA FoodData Central 30-nutrient schema |
 | **5. Mathematical Calculation Engine** | ✅ Connected (Verified) | 33 nutrient profile computed & validated |
-| **6. Trial-Balance & Quality Gate** | ✅ Passed & Savable | GATE: ${d.gateResult.passed ? 'PASS' : 'FAIL'} |
+| **6. Trial-Balance & Quality Gate** | ${d.gateResult.passed ? '✅ Passed & Savable' : '❌ Gate Failed (Review Needed)'} | GATE: ${d.gateResult.passed ? 'PASS' : 'FAIL'} |
 | **7. Health Coach / Clinical Engine** | ✅ Connected (Active) | 4-beat clinical guidance generated |
 | **8. State Storage & Job Sync** | ✅ Connected (${d.eventTrail.length} lifecycle event(s)) | Job ID: \`${d.jobId}\` |
 
@@ -507,8 +523,8 @@ ${constituentRowsTable}
 
 ### 🔬 Mathematical & Thermodynamic Validation
 
-- **Caloric Density:** ${d.gateResult.caloricDensity} kcal/g (✅ ${d.gateResult.caloricDensity <= 5 ? 'Thermodynamically sound' : 'Review needed'})
-- **Atwater Macro Sum:** ${d.gateResult.atwaterSum} kcal (vs ${d.gateResult.calories} kcal logged, diff: ${d.gateResult.atwaterDiff} kcal ✅ Consistent)
+- **Caloric Density:** ${d.gateResult.caloricDensity} kcal/g (${d.gateResult.caloricDensity >= 0.1 && d.gateResult.caloricDensity <= 9.0 ? '✅ Thermodynamically sound' : '⚠️ Review needed'})
+- **Atwater Macro Sum:** ${d.gateResult.atwaterSum} kcal (vs ${d.gateResult.calories} kcal logged, diff: ${d.gateResult.atwaterDiff} kcal ${d.gateResult.passed ? '✅ Consistent' : '⚠️ Deviates'})
 
 ### 📋 Comprehensive Nutrient Values
 
