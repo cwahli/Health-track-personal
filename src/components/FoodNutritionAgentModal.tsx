@@ -199,6 +199,7 @@ interface FoodNutritionAgentModalProps {
   initialSelectedFile?: File | null;
   initialSelectedFiles?: File[] | null;
   initialEditingMeal?: LoggedMeal | null;
+  highestDriveId?: number;
 }
 
 export interface StagedPhotoItem {
@@ -285,6 +286,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
   initialSelectedFile = null,
   initialSelectedFiles = null,
   initialEditingMeal = null,
+  highestDriveId,
 }) => {
   // Selected model defaults to flash 3.5 lite per user instructions
   const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash-lite');
@@ -366,10 +368,20 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
             const idRes = await fetch(`/api/sheets/next-meal-id?sheetUrl=${encodeURIComponent(sheetUrl)}&token=${encodeURIComponent(accessToken || '')}`);
             if (idRes.ok) {
                const idData = await idRes.json();
-               if (idData.nextMealId) setActiveMealId(idData.nextMealId);
+               let nextNum = idData.nextReferenceNumber || 28;
+               
+               // Use MAX of Sheet ID and Drive ID
+               if (highestDriveId && highestDriveId >= nextNum) {
+                 nextNum = highestDriveId + 1;
+               }
+               const nextIdString = `M-${String(nextNum).padStart(3, '0')}`;
+               setActiveMealId(nextIdString);
             }
           } catch(e) {
             console.warn('Could not fetch next meal ID:', e);
+            if (highestDriveId) {
+               setActiveMealId(`M-${String(highestDriveId + 1).padStart(3, '0')}`);
+            }
           }
         };
         fetchNextId();
@@ -1321,6 +1333,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     // Enforce Zero-Duplication Rule: Row 0 gets mealDiagnosis and dailyDiagnosis. Rows 1..N get empty strings.
     const enrichedRows = msg.analysis.rows.map((r: any, idx: number) => ({
       ...r,
+      mealId: initialEditingMeal?.mealId || activeMealId, // Force the correct ID regardless of what Gemini outputs
       photoUrl: allDriveUrlsJoined || (initialEditingMeal?.imageUrl || ''),
       mealDiagnosis: idx === 0 ? (msg.analysis?.mealDiagnosis || msg.analysis?.clinicalSummary || '') : '',
       dailyDiagnosis: idx === 0 ? (msg.analysis?.dailyDiagnosis || msg.analysis?.clinicalSummary || '') : '',
@@ -1328,8 +1341,9 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
 
     try {
       const sheetUrl = localStorage.getItem('nutrihealth_sheet_url') || '';
-      const endpoint = initialEditingMeal ? '/api/sheets/edit-meal-log' : '/api/sheets/append-meal-log';
-      const bodyPayload = initialEditingMeal
+      const isEditAction = initialEditingMeal && !initialEditingMeal.isRecoveredNewMeal;
+      const endpoint = isEditAction ? '/api/sheets/edit-meal-log' : '/api/sheets/append-meal-log';
+      const bodyPayload = isEditAction
         ? {
             mealId: initialEditingMeal.mealId || activeMealId,
             newRows: enrichedRows,

@@ -15,6 +15,7 @@ import {
   AlertTriangle, 
   Trash2, 
   FileEdit,
+  Edit3,
   Sparkles, 
   Image as ImageIcon, 
   ExternalLink, 
@@ -60,6 +61,9 @@ interface MealLogViewProps {
     deletedPhoto: MealPhotoItem,
     newOrderedPhotos: MealPhotoItem[]
   ) => Promise<boolean | void> | boolean | void;
+  orphanedPhotos?: DriveFolderFile[];
+  onRecoverOrphan?: (photo: DriveFolderFile) => void;
+  onDeleteOrphan?: (photo: DriveFolderFile) => void;
 }
 
 export const MealLogView: React.FC<MealLogViewProps> = ({
@@ -74,6 +78,9 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   onUpdateMealPhoto,
   onSetMealTopPhoto,
   onDeleteMealPhoto,
+  orphanedPhotos = [],
+  onRecoverOrphan,
+  onDeleteOrphan,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDayFilter, setSelectedDayFilter] = useState<string>('all');
@@ -396,6 +403,47 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   return (
     <div className="space-y-6 animate-fade-in">
       
+      {/* Orphaned Photos / Pending Recovery UI */}
+      {orphanedPhotos.length > 0 && (
+        <div className="bg-amber-950/40 border border-amber-900/50 rounded-2xl p-5 shadow-xl animate-fade-in">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-amber-500 flex items-center gap-2">
+              <AlertTriangle className="w-5 h-5" />
+              Pending Recovery: Unsynced Drive Photos ({orphanedPhotos.length})
+            </h3>
+            <span className="text-xs text-amber-500/70">
+              Photos uploaded to Google Drive but missing from Google Sheet rows.
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+            {orphanedPhotos.map((photo) => (
+              <div key={photo.id} className="group bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg relative">
+                 <div className="h-32 w-full bg-slate-950 relative">
+                   <img src={photo.thumbnailLink || photo.webViewLink || photo.url} alt={photo.name} className="w-full h-full object-cover" />
+                 </div>
+                 <div className="p-3">
+                   <p className="text-xs text-slate-300 font-medium truncate mb-3" title={photo.name}>{photo.name}</p>
+                   <div className="flex items-center gap-2">
+                     <button
+                       onClick={() => onRecoverOrphan && onRecoverOrphan(photo)}
+                       className="flex-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
+                     >
+                       <Edit3 className="w-3.5 h-3.5" /> Recover
+                     </button>
+                     <button
+                       onClick={() => onDeleteOrphan && onDeleteOrphan(photo)}
+                       className="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/50 text-slate-300 hover:text-rose-400 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 border border-slate-700 hover:border-rose-900/50"
+                     >
+                       <Trash2 className="w-3.5 h-3.5" />
+                     </button>
+                   </div>
+                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Filters & Search */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-xl">
         <div className="flex flex-col md:flex-row gap-3">

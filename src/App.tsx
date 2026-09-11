@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+} from "react";
 import {
   Activity,
   Sheet,
@@ -31,6 +37,7 @@ import {
 } from "./types";
 import { formatDriveImageUrl, MealPhotoItem } from "./utils/driveImage";
 import { getAccessToken, googleSignIn } from "./utils/googleAuth";
+import { fetchGoogleDriveFolderFiles } from "./utils/driveUploader";
 import { Header } from "./components/Header";
 import { DaySelector } from "./components/DaySelector";
 import { DiagnosisBanner } from "./components/DiagnosisBanner";
@@ -54,6 +61,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>("dashboard");
   const [isDriveModalOpen, setIsDriveModalOpen] = useState(false);
 
+  // Orphaned Photos State
+  const [orphanedPhotos, setOrphanedPhotos] = useState<DriveFolderFile[]>([]);
+  const [highestDriveId, setHighestDriveId] = useState<number>(0);
+
   // Meal Logs State - Merge with default Google Sheet drive photo metadata if missing and guarantee unique IDs
   const [meals, setMeals] = useState<LoggedMeal[]>(() => {
     try {
@@ -72,7 +83,9 @@ export default function App() {
               (init) =>
                 init.id === m.id ||
                 init.foodName.toLowerCase() === m.foodName.toLowerCase() ||
-                (init.mealId && m.mealId && init.mealId.toUpperCase() === m.mealId.toUpperCase()),
+                (init.mealId &&
+                  m.mealId &&
+                  init.mealId.toUpperCase() === m.mealId.toUpperCase()),
             );
             if (match) {
               return {
@@ -100,7 +113,8 @@ export default function App() {
 
       for (let i = 0; i < baseList.length; i++) {
         const m = baseList[i];
-        const compositeKey = m.mealId && m.dateStr ? `${m.dateStr}_${m.mealId}`.toUpperCase() : '';
+        const compositeKey =
+          m.mealId && m.dateStr ? `${m.dateStr}_${m.mealId}`.toUpperCase() : "";
         if (compositeKey && seenMealKeys.has(compositeKey)) {
           continue; // Discard duplicate entry for same date and meal code
         }
@@ -108,7 +122,7 @@ export default function App() {
 
         let finalId = m.id;
         if (!finalId || seenIds.has(finalId)) {
-          finalId = `meal-${m.dateStr || m.dayKey || 'day'}-${m.mealId || 'item'}-${i + 1}`;
+          finalId = `meal-${m.dateStr || m.dayKey || "day"}-${m.mealId || "item"}-${i + 1}`;
         }
         seenIds.add(finalId);
         deduplicated.push({ ...m, id: finalId });
@@ -144,11 +158,16 @@ export default function App() {
   const handleSetMealTopPhoto = async (
     meal: LoggedMeal,
     selectedPhoto: MealPhotoItem,
-    newOrderedPhotos: MealPhotoItem[]
+    newOrderedPhotos: MealPhotoItem[],
   ): Promise<boolean> => {
     // 1. Reconstruct photo URLs list with selected photo at index 0
-    const existingUrls = meal.photoUrls && meal.photoUrls.length > 0 ? meal.photoUrls : (meal.imageUrl ? [meal.imageUrl] : []);
-    
+    const existingUrls =
+      meal.photoUrls && meal.photoUrls.length > 0
+        ? meal.photoUrls
+        : meal.imageUrl
+          ? [meal.imageUrl]
+          : [];
+
     const newUrls = newOrderedPhotos.map((p) => {
       const match = existingUrls.find((u) => {
         if (p.fileId && u.includes(p.fileId)) return true;
@@ -159,8 +178,11 @@ export default function App() {
       return match || p.driveUrl || p.url;
     });
 
-    const newPhotoUrlString = newUrls.join(', ');
-    const newFileNames = newOrderedPhotos.map((p) => p.fileName).filter(Boolean).join(', ');
+    const newPhotoUrlString = newUrls.join(", ");
+    const newFileNames = newOrderedPhotos
+      .map((p) => p.fileName)
+      .filter(Boolean)
+      .join(", ");
     const targetMealId = meal.mealId || meal.id;
 
     // 2. Immediate local state update for fast reactive card preview
@@ -175,19 +197,23 @@ export default function App() {
           };
         }
         return m;
-      })
+      }),
     );
 
     setMealSheetRows((prev) =>
       prev.map((r) => {
-        if (r.mealId && targetMealId && r.mealId.trim().toUpperCase() === targetMealId.trim().toUpperCase()) {
+        if (
+          r.mealId &&
+          targetMealId &&
+          r.mealId.trim().toUpperCase() === targetMealId.trim().toUpperCase()
+        ) {
           return {
             ...r,
             photoUrl: newPhotoUrlString,
           };
         }
         return r;
-      })
+      }),
     );
 
     try {
@@ -205,17 +231,25 @@ export default function App() {
           }
           return m;
         });
-        localStorage.setItem("nutrihealth_logged_meals", JSON.stringify(updated));
+        localStorage.setItem(
+          "nutrihealth_logged_meals",
+          JSON.stringify(updated),
+        );
       }
     } catch (e) {
       console.warn("Could not save to localStorage", e);
     }
 
     // 3. Update in Google Sheet
-    const targetSheetUrl = sheetConfig.sheetUrl || localStorage.getItem("nutrihealth_sheet_url") || "";
+    const targetSheetUrl =
+      sheetConfig.sheetUrl ||
+      localStorage.getItem("nutrihealth_sheet_url") ||
+      "";
     if (!targetSheetUrl) {
       setIsConnectModalOpen(true);
-      setUpdateNotification("Top photo updated locally. Connect Google Sheet to persist changes to spreadsheet.");
+      setUpdateNotification(
+        "Top photo updated locally. Connect Google Sheet to persist changes to spreadsheet.",
+      );
       setTimeout(() => setUpdateNotification(null), 4500);
       return true;
     }
@@ -226,7 +260,9 @@ export default function App() {
       try {
         const authRes = await googleSignIn();
         if (!authRes?.accessToken) {
-          setUpdateNotification("Top photo updated locally. Google sign-in required to update spreadsheet.");
+          setUpdateNotification(
+            "Top photo updated locally. Google sign-in required to update spreadsheet.",
+          );
           setTimeout(() => setUpdateNotification(null), 4000);
           return true;
         }
@@ -260,14 +296,19 @@ export default function App() {
         setTimeout(() => setUpdateNotification(null), 3500);
         return true;
       } else {
-        console.warn("Google Sheet photo update notice:", data.error || data.message);
+        console.warn(
+          "Google Sheet photo update notice:",
+          data.error || data.message,
+        );
         setUpdateNotification("Updated locally. " + (data.message || ""));
         setTimeout(() => setUpdateNotification(null), 3500);
         return true;
       }
     } catch (apiErr: any) {
       console.warn("Error calling update-meal-photos:", apiErr);
-      setUpdateNotification("Updated locally. Sheet sync will retry on next sync.");
+      setUpdateNotification(
+        "Updated locally. Sheet sync will retry on next sync.",
+      );
       setTimeout(() => setUpdateNotification(null), 3500);
       return true;
     }
@@ -276,11 +317,16 @@ export default function App() {
   const handleDeleteMealPhoto = async (
     meal: LoggedMeal,
     deletedPhoto: MealPhotoItem,
-    newOrderedPhotos: MealPhotoItem[]
+    newOrderedPhotos: MealPhotoItem[],
   ): Promise<boolean> => {
     // 1. Reconstruct photo URLs list with deleted photo removed
-    const existingUrls = meal.photoUrls && meal.photoUrls.length > 0 ? meal.photoUrls : (meal.imageUrl ? [meal.imageUrl] : []);
-    
+    const existingUrls =
+      meal.photoUrls && meal.photoUrls.length > 0
+        ? meal.photoUrls
+        : meal.imageUrl
+          ? [meal.imageUrl]
+          : [];
+
     const newUrls = newOrderedPhotos.map((p) => {
       const match = existingUrls.find((u) => {
         if (p.fileId && u.includes(p.fileId)) return true;
@@ -291,8 +337,11 @@ export default function App() {
       return match || p.driveUrl || p.url;
     });
 
-    const newPhotoUrlString = newUrls.join(', ');
-    const newFileNames = newOrderedPhotos.map((p) => p.fileName).filter(Boolean).join(', ');
+    const newPhotoUrlString = newUrls.join(", ");
+    const newFileNames = newOrderedPhotos
+      .map((p) => p.fileName)
+      .filter(Boolean)
+      .join(", ");
     const targetMealId = meal.mealId || meal.id;
 
     // 2. Immediate local state update for fast reactive card preview
@@ -307,19 +356,23 @@ export default function App() {
           };
         }
         return m;
-      })
+      }),
     );
 
     setMealSheetRows((prev) =>
       prev.map((r) => {
-        if (r.mealId && targetMealId && r.mealId.trim().toUpperCase() === targetMealId.trim().toUpperCase()) {
+        if (
+          r.mealId &&
+          targetMealId &&
+          r.mealId.trim().toUpperCase() === targetMealId.trim().toUpperCase()
+        ) {
           return {
             ...r,
             photoUrl: newPhotoUrlString,
           };
         }
         return r;
-      })
+      }),
     );
 
     try {
@@ -337,17 +390,25 @@ export default function App() {
           }
           return m;
         });
-        localStorage.setItem("nutrihealth_logged_meals", JSON.stringify(updated));
+        localStorage.setItem(
+          "nutrihealth_logged_meals",
+          JSON.stringify(updated),
+        );
       }
     } catch (e) {
       console.warn("Could not save to localStorage", e);
     }
 
     // 3. Update in Google Sheet
-    const targetSheetUrl = sheetConfig.sheetUrl || localStorage.getItem("nutrihealth_sheet_url") || "";
+    const targetSheetUrl =
+      sheetConfig.sheetUrl ||
+      localStorage.getItem("nutrihealth_sheet_url") ||
+      "";
     if (!targetSheetUrl) {
       setIsConnectModalOpen(true);
-      setUpdateNotification("Photo deleted locally. Connect Google Sheet to persist changes to spreadsheet.");
+      setUpdateNotification(
+        "Photo deleted locally. Connect Google Sheet to persist changes to spreadsheet.",
+      );
       setTimeout(() => setUpdateNotification(null), 4500);
       return true;
     }
@@ -358,7 +419,9 @@ export default function App() {
       try {
         const authRes = await googleSignIn();
         if (!authRes?.accessToken) {
-          setUpdateNotification("Photo deleted locally. Google sign-in required to update spreadsheet.");
+          setUpdateNotification(
+            "Photo deleted locally. Google sign-in required to update spreadsheet.",
+          );
           setTimeout(() => setUpdateNotification(null), 4000);
           return true;
         }
@@ -392,14 +455,19 @@ export default function App() {
         setTimeout(() => setUpdateNotification(null), 3500);
         return true;
       } else {
-        console.warn("Google Sheet photo update notice:", data.error || data.message);
+        console.warn(
+          "Google Sheet photo update notice:",
+          data.error || data.message,
+        );
         setUpdateNotification("Updated locally. " + (data.message || ""));
         setTimeout(() => setUpdateNotification(null), 3500);
         return true;
       }
     } catch (apiErr: any) {
       console.warn("Error calling update-meal-photos:", apiErr);
-      setUpdateNotification("Updated locally. Sheet sync will retry on next sync.");
+      setUpdateNotification(
+        "Updated locally. Sheet sync will retry on next sync.",
+      );
       setTimeout(() => setUpdateNotification(null), 3500);
       return true;
     }
@@ -427,9 +495,19 @@ export default function App() {
         timestamp: new Date().toISOString(),
         localStorage: {
           nutrihealth_sheet_url: localStorage.getItem("nutrihealth_sheet_url"),
-          nutrihealth_logged_meals: localStorage.getItem("nutrihealth_logged_meals") ? JSON.parse(localStorage.getItem("nutrihealth_logged_meals")!) : null,
-          nutrihealth_meal_sheet_rows: localStorage.getItem("nutrihealth_meal_sheet_rows") ? JSON.parse(localStorage.getItem("nutrihealth_meal_sheet_rows")!) : null,
-          nutrihealth_diagnoses: localStorage.getItem("nutrihealth_diagnoses") ? JSON.parse(localStorage.getItem("nutrihealth_diagnoses")!) : null,
+          nutrihealth_logged_meals: localStorage.getItem(
+            "nutrihealth_logged_meals",
+          )
+            ? JSON.parse(localStorage.getItem("nutrihealth_logged_meals")!)
+            : null,
+          nutrihealth_meal_sheet_rows: localStorage.getItem(
+            "nutrihealth_meal_sheet_rows",
+          )
+            ? JSON.parse(localStorage.getItem("nutrihealth_meal_sheet_rows")!)
+            : null,
+          nutrihealth_diagnoses: localStorage.getItem("nutrihealth_diagnoses")
+            ? JSON.parse(localStorage.getItem("nutrihealth_diagnoses")!)
+            : null,
           nutrihealth_sheet_csv: localStorage.getItem("nutrihealth_sheet_csv"),
         },
         reactState: {
@@ -437,10 +515,10 @@ export default function App() {
           mealsRaw: meals,
           mealSheetRowsCount: mealSheetRows.length,
           mealSheetRowsRaw: mealSheetRows,
-          sheetState: sheetState
-        }
+          sheetState: sheetState,
+        },
       };
-      
+
       setDebugJsonPayload(JSON.stringify(debugData, null, 2));
     } catch (e) {
       console.error("Failed to generate debug file:", e);
@@ -494,21 +572,25 @@ export default function App() {
         : undefined);
 
     // Keep primary id distinct from the medical code mealId
-    const uniqueId = ("id" in newMealData && newMealData.id && !newMealData.id.startsWith("M-"))
-      ? newMealData.id
-      : `meal-${newMealData.dateStr || newMealData.dayKey || 'day'}-${googleSheetId || 'custom'}-${Date.now()}`;
+    const uniqueId =
+      "id" in newMealData && newMealData.id && !newMealData.id.startsWith("M-")
+        ? newMealData.id
+        : `meal-${newMealData.dateStr || newMealData.dayKey || "day"}-${googleSheetId || "custom"}-${Date.now()}`;
 
     const created: LoggedMeal = {
       ...newMealData,
       id: uniqueId,
-      mealId: googleSheetId || newMealData.mealId || '',
+      mealId: googleSheetId || newMealData.mealId || "",
     };
 
     setMeals((prev) => {
       // If a meal with the same mealId and date already exists, update it rather than duplicating
       const existingIndex = prev.findIndex(
         (m) =>
-          (created.mealId && m.mealId && m.mealId.toUpperCase() === created.mealId.toUpperCase() && m.dateStr === created.dateStr) ||
+          (created.mealId &&
+            m.mealId &&
+            m.mealId.toUpperCase() === created.mealId.toUpperCase() &&
+            m.dateStr === created.dateStr) ||
           m.id === created.id,
       );
       if (existingIndex !== -1) {
@@ -523,7 +605,9 @@ export default function App() {
     if (newSheetRows && newSheetRows.length > 0) {
       setMealSheetRows((prev) => {
         const filtered = created.mealId
-          ? prev.filter((r) => r.mealId?.toUpperCase() !== created.mealId.toUpperCase())
+          ? prev.filter(
+              (r) => r.mealId?.toUpperCase() !== created.mealId.toUpperCase(),
+            )
           : prev;
         return [...newSheetRows, ...filtered];
       });
@@ -549,7 +633,11 @@ export default function App() {
     if (isDeletingMealId) return;
 
     // Capture meal before removing if present
-    const mealToDelete = meals.find((m) => m.id === id || (m.mealId && id && m.mealId.toUpperCase() === id.toUpperCase()));
+    const mealToDelete = meals.find(
+      (m) =>
+        m.id === id ||
+        (m.mealId && id && m.mealId.toUpperCase() === id.toUpperCase()),
+    );
     const sheetUrl = sheetConfig.sheetUrl;
 
     if (!mealToDelete && !sheetUrl) return;
@@ -562,7 +650,7 @@ export default function App() {
       try {
         const { getAccessToken } = await import("./utils/googleAuth");
         const token = await getAccessToken();
-        
+
         if (!token) {
           throw new Error("Authentication required to delete.");
         }
@@ -572,8 +660,11 @@ export default function App() {
           const { extractDriveFileId } = await import("./utils/driveImage");
           const { deleteImageFromGoogleDrive } =
             await import("./utils/driveUploader");
-          
-          const urls = mealToDelete.imageUrl.split(',').map((u) => u.trim()).filter(Boolean);
+
+          const urls = mealToDelete.imageUrl
+            .split(",")
+            .map((u) => u.trim())
+            .filter(Boolean);
           for (const u of urls) {
             const fId = extractDriveFileId(u);
             if (fId) {
@@ -584,8 +675,12 @@ export default function App() {
           }
 
           if (mealToDelete.driveFileId) {
-            await deleteImageFromGoogleDrive(mealToDelete.driveFileId).catch((e) =>
-              console.warn(`Could not delete photo ${mealToDelete.driveFileId}:`, e),
+            await deleteImageFromGoogleDrive(mealToDelete.driveFileId).catch(
+              (e) =>
+                console.warn(
+                  `Could not delete photo ${mealToDelete.driveFileId}:`,
+                  e,
+                ),
             );
           }
         }
@@ -599,18 +694,26 @@ export default function App() {
             accessToken: token,
           }),
         });
-        
+
         if (res.ok) {
           const data = await res.json();
           console.log("Successfully deleted from sheet:", data.message);
-          
+
           // Re-fetch to ensure sync is perfectly aligned
           setTimeout(() => {
             fetchLiveData(undefined, true);
           }, 1000);
-          
+
           // Actually update local state now that it succeeded
-          setMeals((prev) => prev.filter((m) => m.id !== id && (!mealToDelete || m.id !== mealToDelete.id) && (!targetMealCode || m.mealId?.toUpperCase() !== targetMealCode.toUpperCase())));
+          setMeals((prev) =>
+            prev.filter(
+              (m) =>
+                m.id !== id &&
+                (!mealToDelete || m.id !== mealToDelete.id) &&
+                (!targetMealCode ||
+                  m.mealId?.toUpperCase() !== targetMealCode.toUpperCase()),
+            ),
+          );
           setUpdateNotification("Meal removed from journal & synced.");
         } else {
           const errText = await res.text();
@@ -625,9 +728,17 @@ export default function App() {
         return; // Early return on error
       }
     } else {
-       // If no sheet URL, just delete locally
-       setMeals((prev) => prev.filter((m) => m.id !== id && (!mealToDelete || m.id !== mealToDelete.id) && (!targetMealCode || m.mealId?.toUpperCase() !== targetMealCode.toUpperCase())));
-       setUpdateNotification("Meal removed from journal.");
+      // If no sheet URL, just delete locally
+      setMeals((prev) =>
+        prev.filter(
+          (m) =>
+            m.id !== id &&
+            (!mealToDelete || m.id !== mealToDelete.id) &&
+            (!targetMealCode ||
+              m.mealId?.toUpperCase() !== targetMealCode.toUpperCase()),
+        ),
+      );
+      setUpdateNotification("Meal removed from journal.");
     }
 
     setIsDeletingMealId(null);
@@ -733,42 +844,95 @@ export default function App() {
                 const prevMap = new Map<string, LoggedMeal>();
                 prevMeals.forEach((m) => {
                   if (m.mealId) prevMap.set(m.mealId.toUpperCase(), m);
-                  if (m.mealId && m.dateStr) prevMap.set(`${m.dateStr}_${m.mealId}`.toUpperCase(), m);
+                  if (m.mealId && m.dateStr)
+                    prevMap.set(`${m.dateStr}_${m.mealId}`.toUpperCase(), m);
                   if (m.id) prevMap.set(m.id, m);
                 });
 
                 const initialMap = new Map<string, LoggedMeal>();
                 INITIAL_LOGGED_MEALS.forEach((m) => {
                   if (m.mealId) initialMap.set(m.mealId.toUpperCase(), m);
-                  if (m.mealId && m.dateStr) initialMap.set(`${m.dateStr}_${m.mealId}`.toUpperCase(), m);
+                  if (m.mealId && m.dateStr)
+                    initialMap.set(`${m.dateStr}_${m.mealId}`.toUpperCase(), m);
                 });
 
                 // Map and enrich meals from the sheet
                 const updatedMeals = builtMeals.map((bm) => {
-                  const keyWithDate = bm.mealId && bm.dateStr ? `${bm.dateStr}_${bm.mealId}`.toUpperCase() : '';
-                  const keyId = bm.mealId ? bm.mealId.toUpperCase() : '';
-                  const pm = (keyWithDate ? prevMap.get(keyWithDate) : undefined) || (keyId ? prevMap.get(keyId) : undefined) || initialMap.get(keyWithDate) || initialMap.get(keyId);
-                  
-                  const resolvedImg = bm.imageUrl || pm?.imageUrl || (bm.driveFileName ? formatDriveImageUrl(bm.driveFileName, bm.mealId) : undefined);
-                  const resolvedFileName = bm.driveFileName || pm?.driveFileName || (bm.foodName ? `${bm.foodName.replace(/[^a-zA-Z0-9]/g, '_')}.jpg` : undefined);
-                  const resolvedPhotoUrls = (bm.photoUrls && bm.photoUrls.length > 0)
-                    ? bm.photoUrls
-                    : (pm?.photoUrls && pm.photoUrls.length > 0)
-                      ? pm.photoUrls
-                      : (bm.imageUrl ? bm.imageUrl.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean) : (pm?.imageUrl ? pm.imageUrl.split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean) : undefined));
+                  const keyWithDate =
+                    bm.mealId && bm.dateStr
+                      ? `${bm.dateStr}_${bm.mealId}`.toUpperCase()
+                      : "";
+                  const keyId = bm.mealId ? bm.mealId.toUpperCase() : "";
+
+                  let pm =
+                    (keyWithDate ? prevMap.get(keyWithDate) : undefined) ||
+                    (keyId ? prevMap.get(keyId) : undefined);
+
+                  // Only fallback to initialMap (hardcoded demo data) if the food name matches closely
+                  // This prevents live sheet meals (like M-028 Quaker) from inheriting demo photos (like M-028 Peanuts PXL...jpg)
+                  if (!pm) {
+                    const fallback =
+                      initialMap.get(keyWithDate) || initialMap.get(keyId);
+                    if (
+                      fallback &&
+                      fallback.foodName.trim().toUpperCase() ===
+                        bm.foodName.trim().toUpperCase()
+                    ) {
+                      pm = fallback;
+                    }
+                  }
+
+                  const resolvedImg =
+                    bm.imageUrl ||
+                    pm?.imageUrl ||
+                    (bm.driveFileName
+                      ? formatDriveImageUrl(bm.driveFileName, bm.mealId)
+                      : undefined);
+                  const resolvedFileName =
+                    bm.driveFileName ||
+                    pm?.driveFileName ||
+                    (bm.foodName
+                      ? `${bm.foodName.replace(/[^a-zA-Z0-9]/g, "_")}.jpg`
+                      : undefined);
+                  const resolvedPhotoUrls =
+                    bm.photoUrls && bm.photoUrls.length > 0
+                      ? bm.photoUrls
+                      : pm?.photoUrls && pm.photoUrls.length > 0
+                        ? pm.photoUrls
+                        : bm.imageUrl
+                          ? bm.imageUrl
+                              .split(/[,;\n]+/)
+                              .map((s) => s.trim())
+                              .filter(Boolean)
+                          : pm?.imageUrl
+                            ? pm.imageUrl
+                                .split(/[,;\n]+/)
+                                .map((s) => s.trim())
+                                .filter(Boolean)
+                            : undefined;
 
                   return {
                     ...bm,
                     id: pm?.id || bm.id,
                     imageUrl: resolvedImg || undefined,
-                    photoUrls: resolvedPhotoUrls && resolvedPhotoUrls.length > 0 ? resolvedPhotoUrls : undefined,
+                    photoUrls:
+                      resolvedPhotoUrls && resolvedPhotoUrls.length > 0
+                        ? resolvedPhotoUrls
+                        : undefined,
                     driveFileName: resolvedFileName,
                     driveFileId: bm.driveFileId || pm?.driveFileId,
                     driveFileIds: bm.driveFileIds || pm?.driveFileIds,
-                    clinicalNote: bm.clinicalNote || bm.mealDiagnosis || pm?.clinicalNote || pm?.mealDiagnosis,
+                    clinicalNote:
+                      bm.clinicalNote ||
+                      bm.mealDiagnosis ||
+                      pm?.clinicalNote ||
+                      pm?.mealDiagnosis,
                     mealDiagnosis: bm.mealDiagnosis || pm?.mealDiagnosis,
                     dailyDiagnosis: bm.dailyDiagnosis || pm?.dailyDiagnosis,
-                    time: bm.time && bm.time !== '12:00 PM' ? bm.time : (pm?.time || '12:00 PM'),
+                    time:
+                      bm.time && bm.time !== "12:00 PM"
+                        ? bm.time
+                        : pm?.time || "12:00 PM",
                   };
                 });
 
@@ -779,7 +943,10 @@ export default function App() {
                 const deduplicated: LoggedMeal[] = [];
                 for (let i = 0; i < combined.length; i++) {
                   const m = combined[i];
-                  const compositeKey = m.mealId && m.dateStr ? `${m.dateStr}_${m.mealId}`.toUpperCase() : '';
+                  const compositeKey =
+                    m.mealId && m.dateStr
+                      ? `${m.dateStr}_${m.mealId}`.toUpperCase()
+                      : "";
                   if (compositeKey && seenKeys.has(compositeKey)) {
                     continue; // Skip duplicate meal on the same date with same mealId
                   }
@@ -787,7 +954,7 @@ export default function App() {
 
                   let finalId = m.id;
                   if (!finalId || seenIds.has(finalId)) {
-                    finalId = `meal-${m.dateStr || m.dayKey || 'date'}-${m.mealId || 'item'}-${i + 1}`;
+                    finalId = `meal-${m.dateStr || m.dayKey || "date"}-${m.mealId || "item"}-${i + 1}`;
                   }
                   seenIds.add(finalId);
                   deduplicated.push({ ...m, id: finalId });
@@ -797,8 +964,8 @@ export default function App() {
                 deduplicated.sort((a, b) => {
                   const parseDateVal = (d?: string) => {
                     if (!d) return 0;
-                    if (d.includes('/')) {
-                      const [day, month, year] = d.split('/');
+                    if (d.includes("/")) {
+                      const [day, month, year] = d.split("/");
                       return new Date(`${year}-${month}-${day}`).getTime() || 0;
                     }
                     return new Date(d).getTime() || 0;
@@ -807,8 +974,10 @@ export default function App() {
                   const dateB = parseDateVal(b.dateStr || b.dayKey);
                   if (dateB !== dateA) return dateB - dateA;
 
-                  const numA = parseInt((a.mealId || '').replace(/\D/g, ''), 10) || 0;
-                  const numB = parseInt((b.mealId || '').replace(/\D/g, ''), 10) || 0;
+                  const numA =
+                    parseInt((a.mealId || "").replace(/\D/g, ""), 10) || 0;
+                  const numB =
+                    parseInt((b.mealId || "").replace(/\D/g, ""), 10) || 0;
                   return numB - numA;
                 });
 
@@ -816,6 +985,42 @@ export default function App() {
               });
             } catch (e) {
               console.warn("Failed to parse meal log CSV:", e);
+            }
+          }
+
+          // Now fetch Drive Files and check for orphans
+          if (token) {
+            try {
+              const driveFiles = await fetchGoogleDriveFolderFiles();
+
+              let maxDriveNum = 0;
+              const orphans: DriveFolderFile[] = [];
+
+              const rawMealLog = data.mealLogCSV || "";
+
+              driveFiles.forEach((f) => {
+                if (f.mealId) {
+                  const match = f.mealId.match(/M-(\d+)/i);
+                  if (match) {
+                    const num = parseInt(match[1], 10);
+                    if (!isNaN(num) && num > maxDriveNum) maxDriveNum = num;
+                  }
+                  // Check if this photo's URL, ID, or Filename is bound to ANY row in the sheet
+                  const existsInSheet = rawMealLog.includes(f.id) || rawMealLog.includes(f.name);
+
+                  if (!existsInSheet) {
+                    orphans.push(f);
+                  }
+                }
+              });
+
+              setHighestDriveId(maxDriveNum);
+              setOrphanedPhotos(orphans);
+            } catch (e) {
+              console.warn(
+                "Failed to fetch drive files for orphan detection",
+                e,
+              );
             }
           }
 
@@ -948,7 +1153,9 @@ export default function App() {
         onOpenAskCoach={() => setIsAskCoachOpen(true)}
         onOpenLogMeal={() => {
           if (!sheetConfig.sheetUrl) {
-            setUpdateNotification("Please connect a Google Sheet to log meals.");
+            setUpdateNotification(
+              "Please connect a Google Sheet to log meals.",
+            );
             setIsConnectModalOpen(true);
           } else {
             setIsLogMealOpen(true);
@@ -1045,6 +1252,70 @@ export default function App() {
             onUpdateMealPhoto={handleUpdateMealPhoto}
             onSetMealTopPhoto={handleSetMealTopPhoto}
             onDeleteMealPhoto={handleDeleteMealPhoto}
+            orphanedPhotos={orphanedPhotos}
+            onRecoverOrphan={(photo) => {
+              const parsedRows = mealSheetRows;
+              const sheetRowsWithSameId = parsedRows.filter(
+                (r) => r.mealId?.toUpperCase() === photo.mealId?.toUpperCase(),
+              );
+
+              // If the sheet already has rows for this mealId, and those rows have a different photo,
+              // it's a collision (meaning this photo belongs to a DIFFERENT meal).
+              const isCollision =
+                sheetRowsWithSameId.length > 0 &&
+                sheetRowsWithSameId.some(
+                  (r) =>
+                    r.photoUrl &&
+                    r.photoUrl.length > 5 &&
+                    !r.photoUrl.includes(photo.id) &&
+                    !r.photoUrl.includes(photo.name),
+                );
+
+              // Create a dummy meal just to pass the photo to the review modal
+              const dummyMeal: LoggedMeal = {
+                id: `orphan-${photo.id}`,
+                mealId: isCollision ? "" : photo.mealId || "",
+                isRecoveredNewMeal: isCollision,
+                foodName:
+                  photo.name.replace(/_/g, " ").replace(/\.[^/.]+$/, "") ||
+                  "Recovered Meal",
+                imageUrl: photo.url,
+                photoUrls: [photo.url],
+                driveFileName: photo.name,
+                driveFileId: photo.id,
+                dateStr: new Date().toISOString().split("T")[0], // default to today
+                dayKey: new Date().toISOString().split("T")[0],
+                time: new Date().toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+                mealType: "Snack",
+                portion: "1 portion",
+                calories: 0,
+                protein: 0,
+                totalFat: 0,
+                saturatedFat: 0,
+                carbs: 0,
+                fiber: 0,
+                sodium: 0,
+                addedSugars: 0,
+              };
+              setEditingMeal(dummyMeal);
+              setIsLogMealOpen(true);
+            }}
+            onDeleteOrphan={async (photo) => {
+              // Optional: delete from drive here
+              try {
+                const { deleteImageFromGoogleDrive } =
+                  await import("./utils/driveUploader");
+                await deleteImageFromGoogleDrive(photo.id);
+                setOrphanedPhotos((prev) =>
+                  prev.filter((p) => p.id !== photo.id),
+                );
+              } catch (e) {
+                console.warn("Failed to delete orphaned photo", e);
+              }
+            }}
           />
         )}
 
@@ -1126,7 +1397,7 @@ export default function App() {
             <div className="flex flex-wrap items-center gap-3">
               <a
                 href={`data:text/json;charset=utf-8,${encodeURIComponent(debugJsonPayload)}`}
-                download={`debug-nutrihealth-${new Date().toISOString().replace(/[:.]/g, '-')}.json`}
+                download={`debug-nutrihealth-${new Date().toISOString().replace(/[:.]/g, "-")}.json`}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-sm transition-colors block text-center"
               >
                 Download File
@@ -1134,7 +1405,7 @@ export default function App() {
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(debugJsonPayload);
-                  alert('Copied to clipboard! Please paste this in the chat.');
+                  alert("Copied to clipboard! Please paste this in the chat.");
                 }}
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-semibold text-sm transition-colors"
               >
@@ -1181,6 +1452,7 @@ export default function App() {
         onAddMeal={handleAddMeal}
         onDeleteMeal={handleDeleteMeal}
         initialEditingMeal={editingMeal}
+        highestDriveId={highestDriveId}
       />
     </div>
   );

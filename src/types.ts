@@ -20,6 +20,7 @@ export interface LoggedMeal {
   potassium?: number;
   clinicalNote?: string;
   flags?: string[];
+  isRecoveredNewMeal?: boolean;
   imageUrl?: string;
   photoUrls?: string[];
   driveFileId?: string;
