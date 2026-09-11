@@ -1,0 +1,6 @@
+{
+  "name": "NutriHealth Dashboard & Sheet Sync",
+  "description": "Live Google Sheets connected nutrition and health dashboard for tracking nutrient intake, daily allowances, clinical flags, and personalized AI health recommendations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
