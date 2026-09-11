@@ -315,7 +315,38 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     if (isOpen) {
       if (initialEditingMeal) {
         // Pre-hydrate review & edit mode
-        setActiveMealId(initialEditingMeal.mealId || defaultMealId);
+        if (initialEditingMeal.isRecoveredNewMeal && !initialEditingMeal.mealId) {
+          setActiveMealId('Loading...');
+          const fetchNextId = async () => {
+            try {
+              const sheetUrl = localStorage.getItem('nutrihealth_sheet_url') || '';
+              let accessToken = await getAccessToken();
+              const idRes = await fetch(`/api/sheets/next-meal-id?sheetUrl=${encodeURIComponent(sheetUrl)}&token=${encodeURIComponent(accessToken || '')}`);
+              if (idRes.ok) {
+                 const idData = await idRes.json();
+                 let nextNum = idData.nextReferenceNumber || 28;
+                 
+                 // Use MAX of Sheet ID and Drive ID
+                 if (highestDriveId && highestDriveId >= nextNum) {
+                   nextNum = highestDriveId + 1;
+                 }
+                 const nextIdString = `M-${String(nextNum).padStart(3, '0')}`;
+                 setActiveMealId(nextIdString);
+              }
+            } catch(e) {
+              console.warn('Could not fetch next meal ID:', e);
+              if (highestDriveId) {
+                 setActiveMealId(`M-${String(highestDriveId + 1).padStart(3, '0')}`);
+              } else {
+                 setActiveMealId(defaultMealId);
+              }
+            }
+          };
+          fetchNextId();
+        } else {
+          setActiveMealId(initialEditingMeal.mealId || defaultMealId);
+        }
+        
         if (initialEditingMeal.dateStr) {
           setPhotoDateStr(initialEditingMeal.dateStr);
         }
@@ -347,18 +378,27 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
             existingPhotoUrl: formatted,
           };
         });
-
-        setStagedPhotos(originalStaged);
-
-        setMessages([
-          {
-            id: `edit-greeting-${Date.now()}`,
-            sender: 'agent',
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            text: `📝 **Review & Edit Mode**: You are reviewing **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) logged on **${initialEditingMeal.dateStr || 'today'}**.\n\nAll original photos are attached (${originalStaged.length} photo${originalStaged.length === 1 ? '' : 's'}). Type your edit instructions below (e.g. *“Change portion to 150g”*, *“Adjust sodium to 65mg from label”*, or *“Recalculate with unsweetened oat milk”*) and send to re-evaluate.\n\n*Note: Saving updates the existing Google Sheet cells in-place without creating duplicate Drive photos.*`,
-            imageUrls: originalStaged.map((p) => p.previewUrl),
-          },
-        ]);
+        if (initialEditingMeal.isRecoveredNewMeal) {
+          setMessages([
+            {
+              id: `recovery-greeting-${Date.now()}`,
+              sender: "agent",
+              timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              text: `📸 **Pending Recovery Mode**: I see ${originalStaged.length} photo(s) for **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) that are missing from the spreadsheet.\n\nPlease type **"analyze"** (or provide additional context like *"I added extra cheese"*) to generate the missing nutrition data and add the rows to your spreadsheet.`,
+              imageUrls: originalStaged.map((p) => p.previewUrl),
+            },
+          ]);
+        } else {
+          setMessages([
+            {
+              id: `edit-greeting-${Date.now()}`,
+              sender: "agent",
+              timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+              text: `📝 **Review & Edit Mode**: You are reviewing **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) logged on **${initialEditingMeal.dateStr || "today"}**.\n\nAll original photos are attached (${originalStaged.length} photo${originalStaged.length === 1 ? "" : "s"}). Type your edit instructions below (e.g. *“Change portion to 150g”*, *“Adjust sodium to 65mg from label”*, or *“Recalculate with unsweetened oat milk”*) and send to re-evaluate.\n\n*Note: Saving updates the existing Google Sheet cells in-place without creating duplicate Drive photos.*`,
+              imageUrls: originalStaged.map((p) => p.previewUrl),
+            },
+          ]);
+        }
       } else {
         setActiveMealId(defaultMealId);
         const fetchNextId = async () => {

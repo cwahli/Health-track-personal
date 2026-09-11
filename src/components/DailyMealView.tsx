@@ -508,7 +508,6 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
                     <div className="text-xs text-slate-300 flex items-start gap-2">
                       <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
                       <div>
-                        <span className="text-[10px] font-bold uppercase text-emerald-400 block tracking-wider">Sheet Meal Diagnosis</span>
                         <p className="mt-0.5 leading-relaxed text-slate-300">{meal.clinicalNote}</p>
                       </div>
                     </div>

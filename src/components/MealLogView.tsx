@@ -16,6 +16,7 @@ import {
   Trash2, 
   FileEdit,
   Edit3,
+  Link2,
   Sparkles, 
   Image as ImageIcon, 
   ExternalLink, 
@@ -62,8 +63,9 @@ interface MealLogViewProps {
     newOrderedPhotos: MealPhotoItem[]
   ) => Promise<boolean | void> | boolean | void;
   orphanedPhotos?: DriveFolderFile[];
-  onRecoverOrphan?: (photo: DriveFolderFile) => void;
-  onDeleteOrphan?: (photo: DriveFolderFile) => void;
+  onRecoverOrphan?: (photos: DriveFolderFile[]) => void;
+  onDeleteOrphan?: (photos: DriveFolderFile[]) => void;
+  onMergeOrphan?: (targetMeal: LoggedMeal, photos: DriveFolderFile[]) => void;
 }
 
 export const MealLogView: React.FC<MealLogViewProps> = ({
@@ -81,6 +83,7 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   orphanedPhotos = [],
   onRecoverOrphan,
   onDeleteOrphan,
+  onMergeOrphan,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDayFilter, setSelectedDayFilter] = useState<string>('all');
@@ -105,6 +108,26 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   const [pendingDriveFile, setPendingDriveFile] = useState<{ file: File; targetMealId?: string; isNewMealForm?: boolean } | null>(null);
   const [uploadStatusMsg, setUploadStatusMsg] = useState<string | null>(null);
   const [uploadErrorMsg, setUploadErrorMsg] = useState<string | null>(null);
+
+  // Group Orphaned Photos
+  const orphanGroups = useMemo(() => {
+    const groups = new Map<string, { groupKey: string; mealId: string; dishName: string; photos: DriveFolderFile[] }>();
+    orphanedPhotos.forEach(photo => {
+      const mealIdMatch = photo.name.match(/^(M-\d+)_/i);
+      const mealId = mealIdMatch ? mealIdMatch[1].toUpperCase() : '';
+      let dishName = photo.name.replace(/^(M-\d+)_/i, '');
+      dishName = dishName.replace(/_\d{4}-\d{2}-\d{2}.*$/, '');
+      dishName = dishName.replace(/_photo\d+.*$/i, '');
+      dishName = dishName.replace(/\.[^/.]+$/, '');
+      
+      const groupKey = `${mealId}:::${dishName}`;
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, { groupKey, mealId, dishName, photos: [] });
+      }
+      groups.get(groupKey)!.photos.push(photo);
+    });
+    return Array.from(groups.values());
+  }, [orphanedPhotos]);
 
   // Form State for Adding New Meal
   const [selectedNewMealFile, setSelectedNewMealFile] = useState<File | null>(null);
@@ -404,7 +427,7 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
     <div className="space-y-6 animate-fade-in">
       
       {/* Orphaned Photos / Pending Recovery UI */}
-      {orphanedPhotos.length > 0 && (
+      {orphanGroups.length > 0 && (
         <div className="bg-amber-950/40 border border-amber-900/50 rounded-2xl p-5 shadow-xl animate-fade-in">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-semibold text-amber-500 flex items-center gap-2">
@@ -416,22 +439,57 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
             </span>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-            {orphanedPhotos.map((photo) => (
-              <div key={photo.id} className="group bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg relative">
+            {orphanGroups.map((group) => {
+              const primaryPhoto = group.photos[0];
+              return (
+              <div key={group.groupKey} className="group bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg relative">
                  <div className="h-32 w-full bg-slate-950 relative">
-                   <img src={photo.thumbnailLink || photo.webViewLink || photo.url} alt={photo.name} className="w-full h-full object-cover" />
+                   <img src={primaryPhoto.thumbnailLink || primaryPhoto.webViewLink || primaryPhoto.url} alt={group.dishName} className="w-full h-full object-cover" />
+                   {group.photos.length > 1 && (
+                     <div className="absolute top-2 right-2 bg-slate-900/80 text-white text-[10px] font-bold px-2 py-1 rounded shadow-lg border border-slate-700">
+                       {group.photos.length} Photos
+                     </div>
+                   )}
                  </div>
                  <div className="p-3">
-                   <p className="text-xs text-slate-300 font-medium truncate mb-3" title={photo.name}>{photo.name}</p>
+                   <div className="flex items-center gap-2 mb-2">
+                     <span className="text-[10px] font-bold bg-amber-900/40 text-amber-500 px-1.5 py-0.5 rounded border border-amber-800/50">
+                       {group.mealId || 'No ID'}
+                     </span>
+                     <p className="text-xs text-slate-300 font-medium truncate" title={group.dishName}>{group.dishName.replace(/_/g, ' ')}</p>
+                   </div>
+                   
+                   <div className="bg-slate-950 rounded-lg p-2 mb-3 border border-slate-800/50 flex flex-col items-center justify-center py-3">
+                     <FileSpreadsheet className="w-4 h-4 text-slate-600 mb-1" />
+                     <span className="text-[10px] text-slate-500 font-medium">Missing Spreadsheet Row</span>
+                   </div>
+
                    <div className="flex items-center gap-2">
                      <button
-                       onClick={() => onRecoverOrphan && onRecoverOrphan(photo)}
+                       onClick={() => onRecoverOrphan && onRecoverOrphan(group.photos)}
                        className="flex-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
                      >
-                       <Edit3 className="w-3.5 h-3.5" /> Recover
+                       <Edit3 className="w-3.5 h-3.5" /> Recover as New
                      </button>
                      <button
-                       onClick={() => onDeleteOrphan && onDeleteOrphan(photo)}
+                       onClick={() => {
+                         const targetMeal = meals.find(m => m.mealId?.toUpperCase() === group.mealId?.toUpperCase() && m.foodName.replace(/[^a-zA-Z]/g, '').toUpperCase().includes(group.dishName.replace(/[^a-zA-Z]/g, '').toUpperCase().split('OATMEAL')[0]));
+                         const fallbackMeal = meals.find(m => m.mealId?.toUpperCase() === group.mealId?.toUpperCase());
+                         const mealToMerge = targetMeal || fallbackMeal;
+
+                         if (mealToMerge && onMergeOrphan) {
+                            onMergeOrphan(mealToMerge, group.photos);
+                         } else {
+                            alert('Could not find existing meal ' + group.mealId + ' in the current sheet to attach this photo to. Please recover as new.');
+                         }
+                       }}
+                       className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
+                       title={group.mealId ? `Attach to ${group.mealId}` : 'Attach to meal'}
+                     >
+                       <Link2 className="w-3.5 h-3.5" /> Merge
+                     </button>
+                     <button
+                       onClick={() => onDeleteOrphan && onDeleteOrphan(group.photos)}
                        className="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/50 text-slate-300 hover:text-rose-400 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 border border-slate-700 hover:border-rose-900/50"
                      >
                        <Trash2 className="w-3.5 h-3.5" />
@@ -439,7 +497,7 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                    </div>
                  </div>
               </div>
-            ))}
+            )})}
           </div>
         </div>
       )}
@@ -620,36 +678,36 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                   <div className="mt-3.5 grid grid-cols-4 sm:grid-cols-7 gap-1.5 text-center text-[11px]">
                     <div>
                       <span className="text-[9px] uppercase text-slate-500 block">Protein</span>
-                      <span className="font-semibold text-slate-200">{meal.protein}g</span>
+                      <span className="font-semibold text-slate-200">{Number(meal.protein).toFixed(1).replace(/\.0$/, '')}g</span>
                     </div>
                     <div>
                       <span className="text-[9px] uppercase text-slate-500 block">Carbs</span>
-                      <span className="font-semibold text-slate-200">{meal.carbs}g</span>
+                      <span className="font-semibold text-slate-200">{Number(meal.carbs).toFixed(1).replace(/\.0$/, '')}g</span>
                     </div>
                     <div>
                       <span className="text-[9px] uppercase text-slate-500 block">Fat</span>
-                      <span className="font-semibold text-slate-200">{meal.totalFat}g</span>
+                      <span className="font-semibold text-slate-200">{Number(meal.totalFat).toFixed(1).replace(/\.0$/, '')}g</span>
                     </div>
                     <div>
                       <span className="text-[9px] uppercase text-rose-400 block font-medium">Sat Fat</span>
                       <span className={`font-bold ${meal.saturatedFat > 5 ? 'text-rose-400' : 'text-slate-200'}`}>
-                        {meal.saturatedFat}g
+                        {Number(meal.saturatedFat).toFixed(1).replace(/\.0$/, '')}g
                       </span>
                     </div>
                     <div>
                       <span className="text-[9px] uppercase text-sky-400 block font-medium">Sodium</span>
                       <span className={`font-bold ${meal.sodium > 600 ? 'text-sky-400' : 'text-slate-200'}`}>
-                        {meal.sodium}mg
+                        {Number(meal.sodium).toFixed(1).replace(/\.0$/, '')}mg
                       </span>
                     </div>
                     <div>
                       <span className="text-[9px] uppercase text-emerald-400 block font-medium">Fiber</span>
-                      <span className="font-bold text-emerald-300">{meal.fiber}g</span>
+                      <span className="font-bold text-emerald-300">{Number(meal.fiber).toFixed(1).replace(/\.0$/, '')}g</span>
                     </div>
                     <div>
                       <span className="text-[9px] uppercase text-amber-400 block font-medium">Sugar</span>
                       <span className={`font-bold ${meal.addedSugars > 10 ? 'text-amber-400' : 'text-slate-200'}`}>
-                        {meal.addedSugars}g
+                        {Number(meal.addedSugars).toFixed(1).replace(/\.0$/, '')}g
                       </span>
                     </div>
                   </div>
@@ -659,7 +717,6 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                     <div className="mt-3 text-xs text-slate-300 flex items-start gap-2">
                       <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
                       <div>
-                        <span className="text-[10px] font-bold uppercase text-emerald-400 block tracking-wider">Sheet Meal Diagnosis</span>
                         <p className="mt-0.5 leading-relaxed text-slate-300">{meal.clinicalNote}</p>
                       </div>
                     </div>

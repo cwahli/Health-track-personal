@@ -862,7 +862,7 @@ export default function App() {
                     bm.mealId && bm.dateStr
                       ? `${bm.dateStr}_${bm.mealId}`.toUpperCase()
                       : "";
-                  const keyId = bm.mealId ? bm.mealId.toUpperCase() : "";
+                  const keyId = bm.mealId && bm.dateStr ? `${bm.dateStr}_${bm.mealId}`.toUpperCase() : bm.mealId ? bm.mealId.toUpperCase() : "";
 
                   let pm =
                     (keyWithDate ? prevMap.get(keyWithDate) : undefined) ||
@@ -872,7 +872,8 @@ export default function App() {
                   // This prevents live sheet meals (like M-028 Quaker) from inheriting demo photos (like M-028 Peanuts PXL...jpg)
                   if (!pm) {
                     const fallback =
-                      initialMap.get(keyWithDate) || initialMap.get(keyId);
+                      initialMap.get(keyWithDate) || 
+                      initialMap.get(keyId);
                     if (
                       fallback &&
                       fallback.foodName.trim().toUpperCase() ===
@@ -1253,10 +1254,11 @@ export default function App() {
             onSetMealTopPhoto={handleSetMealTopPhoto}
             onDeleteMealPhoto={handleDeleteMealPhoto}
             orphanedPhotos={orphanedPhotos}
-            onRecoverOrphan={(photo) => {
+            onRecoverOrphan={(photos) => {
+              const primaryPhoto = photos[0];
               const parsedRows = mealSheetRows;
               const sheetRowsWithSameId = parsedRows.filter(
-                (r) => r.mealId?.toUpperCase() === photo.mealId?.toUpperCase(),
+                (r) => r.mealId?.toUpperCase() === primaryPhoto.mealId?.toUpperCase(),
               );
 
               // If the sheet already has rows for this mealId, and those rows have a different photo,
@@ -1267,22 +1269,22 @@ export default function App() {
                   (r) =>
                     r.photoUrl &&
                     r.photoUrl.length > 5 &&
-                    !r.photoUrl.includes(photo.id) &&
-                    !r.photoUrl.includes(photo.name),
+                    !r.photoUrl.includes(primaryPhoto.id) &&
+                    !r.photoUrl.includes(primaryPhoto.name),
                 );
 
               // Create a dummy meal just to pass the photo to the review modal
               const dummyMeal: LoggedMeal = {
-                id: `orphan-${photo.id}`,
-                mealId: isCollision ? "" : photo.mealId || "",
-                isRecoveredNewMeal: isCollision,
+                id: `orphan-${primaryPhoto.id}`,
+                mealId: isCollision ? "" : primaryPhoto.mealId || "",
+                isRecoveredNewMeal: true,
                 foodName:
-                  photo.name.replace(/_/g, " ").replace(/\.[^/.]+$/, "") ||
+                  primaryPhoto.name.replace(/_/g, " ").replace(/\.[^/.]+$/, "") ||
                   "Recovered Meal",
-                imageUrl: photo.url,
-                photoUrls: [photo.url],
-                driveFileName: photo.name,
-                driveFileId: photo.id,
+                imageUrl: primaryPhoto.url,
+                photoUrls: photos.map(p => p.url),
+                driveFileName: photos.map(p => p.name).join(", "),
+                driveFileId: photos.map(p => p.id).join(", "),
                 dateStr: new Date().toISOString().split("T")[0], // default to today
                 dayKey: new Date().toISOString().split("T")[0],
                 time: new Date().toLocaleTimeString([], {
@@ -1303,17 +1305,84 @@ export default function App() {
               setEditingMeal(dummyMeal);
               setIsLogMealOpen(true);
             }}
-            onDeleteOrphan={async (photo) => {
+            onDeleteOrphan={async (photos) => {
               // Optional: delete from drive here
               try {
                 const { deleteImageFromGoogleDrive } =
                   await import("./utils/driveUploader");
-                await deleteImageFromGoogleDrive(photo.id);
+                for (const photo of photos) {
+                  await deleteImageFromGoogleDrive(photo.id);
+                }
                 setOrphanedPhotos((prev) =>
-                  prev.filter((p) => p.id !== photo.id),
+                  prev.filter((p) => !photos.some(groupPhoto => groupPhoto.id === p.id)),
                 );
               } catch (e) {
-                console.warn("Failed to delete orphaned photo", e);
+                console.warn("Failed to delete orphaned photos", e);
+              }
+            }}
+            onMergeOrphan={async (targetMeal, photos) => {
+              if (!sheetConfig.sheetUrl) {
+                setUpdateNotification("Please connect a Google Sheet to sync.");
+                setIsConnectModalOpen(true);
+                return;
+              }
+              const targetSheetUrl = sheetConfig.sheetUrl;
+              setUpdateNotification("Merging photos to Google Sheet...");
+
+              let token = localStorage.getItem("nutrihealth_google_token");
+              if (!token) {
+                try {
+                  const { googleSignIn } = await import("./utils/googleAuth");
+                  const authRes = await googleSignIn();
+                  if (!authRes?.accessToken) {
+                    setUpdateNotification("Google Sign-In required to merge photos.");
+                    return;
+                  }
+                  token = authRes.accessToken;
+                } catch (authErr) {
+                  console.warn("Google sign-in cancelled:", authErr);
+                  setUpdateNotification("Google Sign-In failed.");
+                  return;
+                }
+              }
+
+              try {
+                // Construct the combined URLs string
+                const existingUrls = targetMeal.photoUrls && targetMeal.photoUrls.length > 0 ? targetMeal.photoUrls : targetMeal.imageUrl ? [targetMeal.imageUrl] : [];
+                // remove duplicates just in case
+                const uniqueNewUrls = photos.map(p => p.url).filter(url => !existingUrls.includes(url));
+                const mergedUrls = [...existingUrls, ...uniqueNewUrls].join(', ');
+
+                const res = await fetch("/api/sheets/update-meal-photos", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({
+                    mealId: targetMeal.mealId,
+                    photoUrl: mergedUrls,
+                    sheetUrl: targetSheetUrl,
+                    accessToken: token,
+                  }),
+                });
+                const data = await res.json();
+                if (data.success || data.googleSheetsUpdated) {
+                  // Update locally
+                  const existingNames = targetMeal.driveFileName ? targetMeal.driveFileName.split(',').map(n => n.trim()) : [];
+                  const uniqueNewNames = photos.map(p => p.name).filter(n => !existingNames.includes(n));
+                  const mergedNames = [...existingNames, ...uniqueNewNames].join(', ');
+                  
+                  handleUpdateMealPhoto(targetMeal.id, mergedUrls, mergedNames);
+                  setOrphanedPhotos((prev) => prev.filter((p) => !photos.some(groupPhoto => groupPhoto.id === p.id)));
+                  setUpdateNotification("Photos merged into Google Sheet!");
+                } else {
+                  console.warn("Google Sheet photo update notice:", data.error || data.message);
+                  setUpdateNotification("Merge failed. " + (data.message || ""));
+                }
+              } catch (apiErr: any) {
+                console.warn("Error calling update-meal-photos:", apiErr);
+                setUpdateNotification("Merge failed.");
               }
             }}
           />
