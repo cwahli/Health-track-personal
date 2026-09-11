@@ -212,6 +212,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
   // Editing component rows inside chat message
   const [editingRowIndex, setEditingRowIndex] = useState<{ msgId: string; rowIndex: number } | null>(null);
   const [customWeights, setCustomWeights] = useState<Record<string, string>>({});
+  const [selectedDiscrepancyRow, setSelectedDiscrepancyRow] = useState<Record<string, number | 'all'>>({});
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -327,6 +328,57 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     };
 
     setMessages((prev) => [...prev, userMsg]);
+
+    // Check if user is asking to adjust a specific ingredient in the existing meal analysis
+    const lastAgentMsg = [...messages].reverse().find(
+      (m) => m.sender === 'agent' && m.analysis && m.analysis.rows && m.analysis.rows.length > 0
+    );
+
+    if (currentStaged.length === 0 && lastAgentMsg && lastAgentMsg.analysis) {
+      const lower = userText.toLowerCase();
+      // Look for target weight in grams (e.g., "to 200", "set ... to 200", "200g", "200 g")
+      const weightMatch = lower.match(/(?:to\s*|set\s*|is\s*|=|\b)(\d+(?:\.\d+)?)\s*(?:g|grams?|\b)/i);
+      if (weightMatch) {
+        const targetWeight = Number(weightMatch[1]);
+        if (targetWeight > 0) {
+          const rows = lastAgentMsg.analysis.rows;
+          let matchedIdx = -1;
+          for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            const name = ((r.dishName || '') + ' ' + (r.ingredient || '')).toLowerCase();
+            const words = name.split(/[\s,()/-]+/).filter(w => w.length >= 3);
+            if (words.some(w => lower.includes(w))) {
+              matchedIdx = i;
+              break;
+            }
+          }
+
+          if (matchedIdx >= 0) {
+            handleScaleMealWeight(lastAgentMsg.id, targetWeight, matchedIdx);
+
+            const matchedRow = rows[matchedIdx];
+            const targetName = matchedRow.dishName || matchedRow.ingredient;
+            const otherRows = rows.filter((_, idx) => idx !== matchedIdx);
+            const otherNames = otherRows.map(r => `${r.dishName || r.ingredient} (${r.weightG}g)`).join(', ');
+
+            const confirmationMsg: ChatMessage = {
+              id: `msg-agent-${Date.now()}`,
+              sender: 'agent',
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              text: `✅ Updated **${targetName}** to **${targetWeight}g** and recalculated all 38 nutrient columns proportionately.\n\n${
+                otherRows.length > 0 ? `*Unmodified ingredients preserved:* ${otherNames}.` : ''
+              }`,
+            };
+
+            setMessages(prev => [...prev, confirmationMsg]);
+            setIsAnalyzing(false);
+            setAnalysisStatus('');
+            return;
+          }
+        }
+      }
+    }
+
     setIsAnalyzing(true);
     setAnalysisStatus(`Analyzing ${currentStaged.length} photo(s) with ${selectedModel}...`);
 
@@ -418,6 +470,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           mealSlot: defaultMealSlot,
           dateStr: extractedDateStr,
           dailyNutrientsContext: dailyLedgerContent,
+          existingAnalysis: lastAgentMsg?.analysis,
         }),
       });
 
@@ -531,6 +584,58 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     }, 2500);
   };
 
+  // Helper to cleanly scale all 38 nutrient columns for a single ingredient row
+  const scaleSingleRow = (oldRow: MealLogRow, ratio: number, explicitWeightG?: number): MealLogRow => {
+    const scale = (val: any) => {
+      const num = Number(val);
+      if (isNaN(num)) return val;
+      const res = num * ratio;
+      return Number.isInteger(res) ? res : Number(res.toFixed(1));
+    };
+
+    const newWeight = explicitWeightG !== undefined
+      ? explicitWeightG
+      : (Number.isInteger(Number(oldRow.weightG) * ratio)
+          ? Number(oldRow.weightG) * ratio
+          : Number((Number(oldRow.weightG) * ratio).toFixed(1)));
+
+    return {
+      ...oldRow,
+      weightG: newWeight,
+      calories: Math.round((Number(oldRow.calories) || 0) * ratio),
+      protein: scale(oldRow.protein),
+      totalFat: scale(oldRow.totalFat),
+      saturatedFat: scale(oldRow.saturatedFat),
+      carbs: scale(oldRow.carbs),
+      fiber: scale(oldRow.fiber),
+      totalSugars: scale(oldRow.totalSugars),
+      sodium: Math.round((Number(oldRow.sodium) || 0) * ratio),
+      potassium: Math.round((Number(oldRow.potassium) || 0) * ratio),
+      calcium: Math.round((Number(oldRow.calcium) || 0) * ratio),
+      iron: scale(oldRow.iron),
+      magnesium: Math.round((Number(oldRow.magnesium) || 0) * ratio),
+      phosphorus: Math.round((Number(oldRow.phosphorus) || 0) * ratio),
+      zinc: scale(oldRow.zinc),
+      selenium: scale(oldRow.selenium),
+      vitaminA: scale(oldRow.vitaminA),
+      vitaminC: scale(oldRow.vitaminC),
+      vitaminD: scale(oldRow.vitaminD),
+      vitaminE: scale(oldRow.vitaminE),
+      vitaminK: scale(oldRow.vitaminK),
+      vitaminB12: scale(oldRow.vitaminB12),
+      folate: scale(oldRow.folate),
+      vitaminB6: scale(oldRow.vitaminB6),
+      thiaminB1: scale(oldRow.thiaminB1),
+      riboflavinB2: scale(oldRow.riboflavinB2),
+      niacinB3: scale(oldRow.niacinB3),
+      monounsaturatedFat: scale(oldRow.monounsaturatedFat),
+      polyunsaturatedFat: scale(oldRow.polyunsaturatedFat),
+      transFat: scale(oldRow.transFat),
+      cholesterol: scale(oldRow.cholesterol),
+      addedSugars: scale(oldRow.addedSugars),
+    };
+  };
+
   // Editable row handler inside the component breakdown table
   const handleUpdateAnalysisRow = (msgId: string, rowIndex: number, field: keyof MealLogRow, value: any) => {
     setMessages((prev) =>
@@ -538,6 +643,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
         if (msg.id !== msgId || !msg.analysis) return msg;
         const updatedRows = [...msg.analysis.rows];
         const oldRow = updatedRows[rowIndex];
+        if (!oldRow) return msg;
         
         let target = { ...oldRow, [field]: value };
 
@@ -547,19 +653,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           const newWeight = Number(value) || 0;
           if (oldWeight > 0 && newWeight > 0) {
             const ratio = newWeight / oldWeight;
-            target = {
-              ...target,
-              calories: Math.round((Number(oldRow.calories) || 0) * ratio),
-              protein: Math.round((Number(oldRow.protein) || 0) * ratio * 10) / 10,
-              totalFat: Math.round((Number(oldRow.totalFat) || 0) * ratio * 10) / 10,
-              carbs: Math.round((Number(oldRow.carbs) || 0) * ratio * 10) / 10,
-              saturatedFat: Math.round((Number(oldRow.saturatedFat) || 0) * ratio * 10) / 10,
-              sodium: Math.round((Number(oldRow.sodium) || 0) * ratio),
-              addedSugars: Math.round((Number(oldRow.addedSugars) || 0) * ratio * 10) / 10,
-              fiber: Math.round((Number(oldRow.fiber) || 0) * ratio * 10) / 10,
-              potassium: Math.round((Number(oldRow.potassium) || 0) * ratio),
-              cholesterol: Math.round((Number(oldRow.cholesterol) || 0) * ratio),
-            };
+            target = scaleSingleRow(oldRow, ratio, newWeight);
           }
         }
 
@@ -575,15 +669,19 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
 
         const agg = {
           calories: updatedRows.reduce((sum, r) => sum + (Number(r.calories) || 0), 0),
-          protein: updatedRows.reduce((sum, r) => sum + (Number(r.protein) || 0), 0),
-          totalFat: updatedRows.reduce((sum, r) => sum + (Number(r.totalFat) || 0), 0),
-          saturatedFat: updatedRows.reduce((sum, r) => sum + (Number(r.saturatedFat) || 0), 0),
-          carbs: updatedRows.reduce((sum, r) => sum + (Number(r.carbs) || 0), 0),
-          fiber: updatedRows.reduce((sum, r) => sum + (Number(r.fiber) || 0), 0),
-          sodium: updatedRows.reduce((sum, r) => sum + (Number(r.sodium) || 0), 0),
-          potassium: updatedRows.reduce((sum, r) => sum + (Number(r.potassium) || 0), 0),
-          addedSugars: updatedRows.reduce((sum, r) => sum + (Number(r.addedSugars) || 0), 0),
+          protein: Number(updatedRows.reduce((sum, r) => sum + (Number(r.protein) || 0), 0).toFixed(1)),
+          totalFat: Number(updatedRows.reduce((sum, r) => sum + (Number(r.totalFat) || 0), 0).toFixed(1)),
+          saturatedFat: Number(updatedRows.reduce((sum, r) => sum + (Number(r.saturatedFat) || 0), 0).toFixed(1)),
+          carbs: Number(updatedRows.reduce((sum, r) => sum + (Number(r.carbs) || 0), 0).toFixed(1)),
+          fiber: Number(updatedRows.reduce((sum, r) => sum + (Number(r.fiber) || 0), 0).toFixed(1)),
+          sodium: Math.round(updatedRows.reduce((sum, r) => sum + (Number(r.sodium) || 0), 0)),
+          potassium: Math.round(updatedRows.reduce((sum, r) => sum + (Number(r.potassium) || 0), 0)),
+          addedSugars: Number(updatedRows.reduce((sum, r) => sum + (Number(r.addedSugars) || 0), 0).toFixed(1)),
         };
+
+        const totalWeight = updatedRows.reduce((sum, r) => sum + (Number(r.weightG) || 0), 0);
+        const atwaterSum = Math.round(agg.protein * 4 + agg.carbs * 4 + agg.totalFat * 9 + agg.fiber * 2);
+        const atwaterDiff = Math.abs(agg.calories - atwaterSum);
 
         const headers = msg.analysis.columnHeaders || [];
         const tsvFormatted = [
@@ -605,49 +703,62 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
             rows: updatedRows,
             aggregatedTotals: agg,
             tsvFormatted,
+            atwaterEvaluation: {
+              totalWeightG: totalWeight,
+              calories: agg.calories,
+              protein: agg.protein,
+              carbs: agg.carbs,
+              fat: agg.totalFat,
+              atwaterSum,
+              atwaterDiff,
+              caloricDensity: totalWeight > 0 ? Number((agg.calories / totalWeight).toFixed(1)) : 0,
+              withinTolerance: atwaterDiff <= Math.max(30, agg.calories * 0.08),
+            },
           },
         };
       })
     );
   };
 
-  const handleScaleMealWeight = (msgId: string, targetWeightG: number) => {
+  // Scales either a single targeted ingredient row (default) or all rows proportionally
+  const handleScaleMealWeight = (msgId: string, targetWeightG: number, targetRowIndex: number | 'all' = 0) => {
     setMessages((prev) =>
       prev.map((msg) => {
         if (msg.id !== msgId || !msg.analysis) return msg;
 
-        // Base the scaling off the actual sum of the row weights (the portion), 
-        // not the total package weight.
-        const currentTotal = msg.analysis.rows.reduce((sum, r) => sum + (Number(r.weightG) || 0), 0);
-        if (currentTotal <= 0) return msg;
-        const ratio = targetWeightG / currentTotal;
+        let scaledRows = [...msg.analysis.rows];
 
-        const scaledRows = msg.analysis.rows.map((row) => ({
-          ...row,
-          weightG: Math.round((Number(row.weightG) || 0) * ratio * 10) / 10,
-          calories: Math.round((Number(row.calories) || 0) * ratio),
-          protein: Math.round((Number(row.protein) || 0) * ratio * 10) / 10,
-          totalFat: Math.round((Number(row.totalFat) || 0) * ratio * 10) / 10,
-          carbs: Math.round((Number(row.carbs) || 0) * ratio * 10) / 10,
-          saturatedFat: Math.round((Number(row.saturatedFat) || 0) * ratio * 10) / 10,
-          sodium: Math.round((Number(row.sodium) || 0) * ratio),
-          addedSugars: Math.round((Number(row.addedSugars) || 0) * ratio * 10) / 10,
-          fiber: Math.round((Number(row.fiber) || 0) * ratio * 10) / 10,
-          potassium: Math.round((Number(row.potassium) || 0) * ratio),
-          cholesterol: Math.round((Number(row.cholesterol) || 0) * ratio),
-        }));
+        if (targetRowIndex === 'all') {
+          const currentTotal = msg.analysis.rows.reduce((sum, r) => sum + (Number(r.weightG) || 0), 0);
+          if (currentTotal <= 0) return msg;
+          const ratio = targetWeightG / currentTotal;
+          scaledRows = msg.analysis.rows.map((row) => scaleSingleRow(row, ratio));
+        } else {
+          const rowIndex = typeof targetRowIndex === 'number' ? targetRowIndex : 0;
+          const targetRow = scaledRows[rowIndex];
+          if (!targetRow) return msg;
+          const oldWeight = Number(targetRow.weightG) || 0;
+          if (oldWeight <= 0) return msg;
+          const ratio = targetWeightG / oldWeight;
+          // Scale ONLY the targeted row; keep all other rows strictly untouched
+          scaledRows = scaledRows.map((row, idx) => (idx === rowIndex ? scaleSingleRow(row, ratio, targetWeightG) : row));
+        }
 
         const agg = {
           calories: scaledRows.reduce((sum, r) => sum + (Number(r.calories) || 0), 0),
-          protein: scaledRows.reduce((sum, r) => sum + (Number(r.protein) || 0), 0),
-          totalFat: scaledRows.reduce((sum, r) => sum + (Number(r.totalFat) || 0), 0),
-          saturatedFat: scaledRows.reduce((sum, r) => sum + (Number(r.saturatedFat) || 0), 0),
-          carbs: scaledRows.reduce((sum, r) => sum + (Number(r.carbs) || 0), 0),
-          fiber: scaledRows.reduce((sum, r) => sum + (Number(r.fiber) || 0), 0),
-          sodium: scaledRows.reduce((sum, r) => sum + (Number(r.sodium) || 0), 0),
-          potassium: scaledRows.reduce((sum, r) => sum + (Number(r.potassium) || 0), 0),
-          addedSugars: scaledRows.reduce((sum, r) => sum + (Number(r.addedSugars) || 0), 0),
+          protein: Number(scaledRows.reduce((sum, r) => sum + (Number(r.protein) || 0), 0).toFixed(1)),
+          totalFat: Number(scaledRows.reduce((sum, r) => sum + (Number(r.totalFat) || 0), 0).toFixed(1)),
+          saturatedFat: Number(scaledRows.reduce((sum, r) => sum + (Number(r.saturatedFat) || 0), 0).toFixed(1)),
+          carbs: Number(scaledRows.reduce((sum, r) => sum + (Number(r.carbs) || 0), 0).toFixed(1)),
+          fiber: Number(scaledRows.reduce((sum, r) => sum + (Number(r.fiber) || 0), 0).toFixed(1)),
+          sodium: Math.round(scaledRows.reduce((sum, r) => sum + (Number(r.sodium) || 0), 0)),
+          potassium: Math.round(scaledRows.reduce((sum, r) => sum + (Number(r.potassium) || 0), 0)),
+          addedSugars: Number(scaledRows.reduce((sum, r) => sum + (Number(r.addedSugars) || 0), 0).toFixed(1)),
         };
+
+        const totalWeight = scaledRows.reduce((sum, r) => sum + (Number(r.weightG) || 0), 0);
+        const atwaterSum = Math.round(agg.protein * 4 + agg.carbs * 4 + agg.totalFat * 9 + agg.fiber * 2);
+        const atwaterDiff = Math.abs(agg.calories - atwaterSum);
 
         const headers = msg.analysis.columnHeaders || [];
         const tsvFormatted = [
@@ -669,6 +780,17 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
             rows: scaledRows,
             aggregatedTotals: agg,
             tsvFormatted,
+            atwaterEvaluation: {
+              totalWeightG: totalWeight,
+              calories: agg.calories,
+              protein: agg.protein,
+              carbs: agg.carbs,
+              fat: agg.totalFat,
+              atwaterSum,
+              atwaterDiff,
+              caloricDensity: totalWeight > 0 ? Number((agg.calories / totalWeight).toFixed(1)) : 0,
+              withinTolerance: atwaterDiff <= Math.max(30, agg.calories * 0.08),
+            },
             weightDifferenceDetected: false, // Hide warning once resolved
             confirmedWeightG: targetWeightG,
           },
@@ -1773,59 +1895,107 @@ Google Sheet 38 Column Order:
                       </div>
 
                       {/* Weight Discrepancy Warning */}
-                      {msg.analysis.weightDifferenceDetected && msg.analysis.weightClarificationPrompt && (
-                        <div className="mb-4 bg-amber-950/40 border border-amber-500/50 rounded-xl p-3 flex gap-3 items-start animate-fade-in">
-                          <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                          <div className="flex-1">
-                            <h5 className="text-xs font-bold text-amber-300 mb-1">Weight Discrepancy Detected</h5>
-                            <p className="text-xs text-amber-200/90 leading-relaxed mb-3">
-                              {msg.analysis.weightClarificationPrompt}
-                            </p>
-                            <div className="flex flex-col sm:flex-row flex-wrap items-center gap-2">
-                              {msg.analysis.totalDishWeightG && msg.analysis.totalDishWeightG > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleScaleMealWeight(msg.id, msg.analysis!.totalDishWeightG!)}
-                                  className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 rounded-lg text-xs font-medium border border-amber-500/50 transition-colors shadow-sm"
-                                >
-                                  Log Entire Dish ({msg.analysis.totalDishWeightG}g)
-                                </button>
-                              ) : null}
-                              {msg.analysis.portionWeightG && msg.analysis.portionWeightG > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleScaleMealWeight(msg.id, msg.analysis!.portionWeightG!)}
-                                  className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 rounded-lg text-xs font-medium border border-amber-500/50 transition-colors shadow-sm"
-                                >
-                                  Log Portion Only ({msg.analysis.portionWeightG}g)
-                                </button>
-                              ) : null}
-                              <div className="flex items-center gap-2 sm:ml-auto w-full sm:w-auto">
-                                <input
-                                  type="number"
-                                  placeholder="Custom (g)"
-                                  value={customWeights[msg.id] || ''}
-                                  onChange={(e) => setCustomWeights(prev => ({ ...prev, [msg.id]: e.target.value }))}
-                                  className="w-full sm:w-24 px-2 py-1.5 bg-amber-950/30 border border-amber-500/30 rounded-lg text-xs text-amber-200 placeholder-amber-700/50 focus:outline-none focus:border-amber-500"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const cw = Number(customWeights[msg.id]);
-                                    if (cw > 0) {
-                                      handleScaleMealWeight(msg.id, cw);
-                                    }
-                                  }}
-                                  disabled={!customWeights[msg.id] || Number(customWeights[msg.id]) <= 0}
-                                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors shrink-0"
-                                >
-                                  Apply
-                                </button>
+                      {msg.analysis.weightDifferenceDetected && msg.analysis.weightClarificationPrompt && (() => {
+                        const promptLower = (msg.analysis.weightClarificationPrompt || '').toLowerCase();
+                        const foundAutoIdx = msg.analysis.rows.findIndex(r => {
+                          const name = ((r.dishName || '') + ' ' + (r.ingredient || '')).toLowerCase();
+                          return name.split(/[\s,()/-]+/).some(w => w.length >= 4 && promptLower.includes(w));
+                        });
+                        const defaultIdx = foundAutoIdx >= 0 ? foundAutoIdx : 0;
+                        const activeTargetIndex = selectedDiscrepancyRow[msg.id] ?? defaultIdx;
+
+                        const isAll = activeTargetIndex === 'all';
+                        const targetRow = typeof activeTargetIndex === 'number' ? msg.analysis.rows[activeTargetIndex] : null;
+                        const targetName = targetRow ? (targetRow.dishName || targetRow.ingredient) : 'Entire Meal';
+                        const currentWeight = targetRow ? Number(targetRow.weightG) || 0 : msg.analysis.rows.reduce((s, r) => s + (Number(r.weightG) || 0), 0);
+                        const packageWeight = msg.analysis.totalDishWeightG || 0;
+
+                        return (
+                          <div className="mb-4 bg-amber-950/40 border border-amber-500/50 rounded-xl p-3.5 flex gap-3 items-start animate-fade-in shadow-md">
+                            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1.5">
+                                <h5 className="text-xs font-bold text-amber-300">Weight Discrepancy Detected</h5>
+                                {msg.analysis.rows.length > 1 && (
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <span className="text-[11px] text-amber-300/80 font-medium">Target Component:</span>
+                                    <select
+                                      value={activeTargetIndex}
+                                      onChange={(e) => {
+                                        const val = e.target.value === 'all' ? 'all' : Number(e.target.value);
+                                        setSelectedDiscrepancyRow(prev => ({ ...prev, [msg.id]: val }));
+                                      }}
+                                      className="bg-slate-900 border border-amber-500/50 rounded px-2 py-1 text-xs text-amber-200 font-medium focus:outline-none focus:border-amber-400 cursor-pointer"
+                                    >
+                                      {msg.analysis.rows.map((row, rIdx) => (
+                                        <option key={rIdx} value={rIdx}>
+                                          {row.dishName || row.ingredient} ({row.weightG}g)
+                                        </option>
+                                      ))}
+                                      <option value="all">Entire Meal (All components proportionally)</option>
+                                    </select>
+                                  </div>
+                                )}
+                              </div>
+                              <p className="text-xs text-amber-200/90 leading-relaxed mb-3">
+                                {msg.analysis.weightClarificationPrompt}
+                              </p>
+                              <div className="flex flex-col sm:flex-row flex-wrap items-center gap-2">
+                                {packageWeight > 0 ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScaleMealWeight(msg.id, packageWeight, activeTargetIndex)}
+                                    className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 rounded-lg text-xs font-medium border border-amber-500/50 transition-colors shadow-sm text-left"
+                                  >
+                                    Log Full Package ({packageWeight}g) for {targetName}
+                                  </button>
+                                ) : null}
+                                {currentWeight > 0 ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScaleMealWeight(msg.id, currentWeight, activeTargetIndex)}
+                                    className="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/30 text-amber-300/90 rounded-lg text-xs font-medium border border-amber-500/30 transition-colors shadow-sm text-left"
+                                  >
+                                    Keep Portion ({currentWeight}g)
+                                  </button>
+                                ) : null}
+                                <div className="flex items-center gap-2 sm:ml-auto w-full sm:w-auto">
+                                  <span className="text-[11px] text-amber-300/80 whitespace-nowrap">Set {targetName}:</span>
+                                  <input
+                                    type="number"
+                                    placeholder="Custom (g)"
+                                    value={customWeights[msg.id] || ''}
+                                    onChange={(e) => setCustomWeights(prev => ({ ...prev, [msg.id]: e.target.value }))}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        const cw = Number(customWeights[msg.id]);
+                                        if (cw > 0) {
+                                          handleScaleMealWeight(msg.id, cw, activeTargetIndex);
+                                        }
+                                      }
+                                    }}
+                                    className="w-20 px-2 py-1.5 bg-amber-950/30 border border-amber-500/30 rounded-lg text-xs text-amber-200 placeholder-amber-700/50 focus:outline-none focus:border-amber-500"
+                                  />
+                                  <span className="text-xs text-amber-300/80 font-medium">g</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const cw = Number(customWeights[msg.id]);
+                                      if (cw > 0) {
+                                        handleScaleMealWeight(msg.id, cw, activeTargetIndex);
+                                      }
+                                    }}
+                                    disabled={!customWeights[msg.id] || Number(customWeights[msg.id]) <= 0}
+                                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors shrink-0 cursor-pointer"
+                                  >
+                                    Apply
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
 
                       <div className="prose prose-invert prose-xs text-xs text-slate-300 whitespace-pre-line leading-relaxed mb-3">
                         {msg.analysis.clinicalSummary}

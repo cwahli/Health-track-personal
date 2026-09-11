@@ -1423,6 +1423,7 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
     dateStr = '2026-09-08',
     patientContext,
     dailyNutrientsContext,
+    existingAnalysis,
   } = req.body;
 
   try {
@@ -1484,6 +1485,128 @@ app.post('/api/gemini/analyze-meal-photo', async (req, res) => {
     }
 
     if (!ai) {
+      if (existingAnalysis && existingAnalysis.rows && existingAnalysis.rows.length > 0) {
+        // Surgically adjust only the requested component without replacing the meal
+        let targetRowIndex = 0;
+        let targetWeight = 200;
+        const lowerMsg = (userMessage || '').toLowerCase();
+        const weightMatch = lowerMsg.match(/(\d+(?:\.\d+)?)\s*g?\b/);
+        if (weightMatch) targetWeight = Number(weightMatch[1]);
+
+        const matchedIdx = existingAnalysis.rows.findIndex((r: any) => {
+          const name = ((r.dishName || '') + ' ' + (r.ingredient || '')).toLowerCase();
+          return name.split(/\s+/).some((word: string) => word.length >= 4 && lowerMsg.includes(word));
+        });
+        if (matchedIdx >= 0) targetRowIndex = matchedIdx;
+
+        const targetRow = existingAnalysis.rows[targetRowIndex];
+        const oldWeight = Number(targetRow.weightG) || 35;
+        const ratio = targetWeight / oldWeight;
+
+        const updatedRows = existingAnalysis.rows.map((row: any, idx: number) => {
+          if (idx !== targetRowIndex) return { ...row };
+          const scale = (val: any) => {
+            const num = Number(val);
+            if (isNaN(num)) return val;
+            const res = num * ratio;
+            return Number.isInteger(res) ? res : Number(res.toFixed(1));
+          };
+          return {
+            ...row,
+            weightG: targetWeight,
+            calories: Math.round((Number(row.calories) || 0) * ratio),
+            protein: scale(row.protein),
+            totalFat: scale(row.totalFat),
+            saturatedFat: scale(row.saturatedFat),
+            carbs: scale(row.carbs),
+            fiber: scale(row.fiber),
+            totalSugars: scale(row.totalSugars),
+            sodium: Math.round((Number(row.sodium) || 0) * ratio),
+            potassium: Math.round((Number(row.potassium) || 0) * ratio),
+            calcium: Math.round((Number(row.calcium) || 0) * ratio),
+            iron: scale(row.iron),
+            magnesium: Math.round((Number(row.magnesium) || 0) * ratio),
+            phosphorus: Math.round((Number(row.phosphorus) || 0) * ratio),
+            zinc: scale(row.zinc),
+            selenium: scale(row.selenium),
+            vitaminA: scale(row.vitaminA),
+            vitaminC: scale(row.vitaminC),
+            vitaminD: scale(row.vitaminD),
+            vitaminE: scale(row.vitaminE),
+            vitaminK: scale(row.vitaminK),
+            vitaminB12: scale(row.vitaminB12),
+            folate: scale(row.folate),
+            vitaminB6: scale(row.vitaminB6),
+            thiaminB1: scale(row.thiaminB1),
+            riboflavinB2: scale(row.riboflavinB2),
+            niacinB3: scale(row.niacinB3),
+            monounsaturatedFat: scale(row.monounsaturatedFat),
+            polyunsaturatedFat: scale(row.polyunsaturatedFat),
+            transFat: scale(row.transFat),
+            cholesterol: scale(row.cholesterol),
+            addedSugars: scale(row.addedSugars),
+          };
+        });
+
+        const agg = {
+          calories: updatedRows.reduce((sum: number, r: any) => sum + (Number(r.calories) || 0), 0),
+          protein: Number(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.protein) || 0), 0).toFixed(1)),
+          totalFat: Number(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.totalFat) || 0), 0).toFixed(1)),
+          saturatedFat: Number(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.saturatedFat) || 0), 0).toFixed(1)),
+          carbs: Number(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.carbs) || 0), 0).toFixed(1)),
+          fiber: Number(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.fiber) || 0), 0).toFixed(1)),
+          sodium: Math.round(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.sodium) || 0), 0)),
+          potassium: Math.round(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.potassium) || 0), 0)),
+          addedSugars: Number(updatedRows.reduce((sum: number, r: any) => sum + (Number(r.addedSugars) || 0), 0).toFixed(1)),
+        };
+
+        const totalWeight = updatedRows.reduce((sum: number, r: any) => sum + (Number(r.weightG) || 0), 0);
+        const atwaterSum = Math.round(agg.protein * 4 + agg.carbs * 4 + agg.totalFat * 9 + agg.fiber * 2);
+        const atwaterDiff = Math.abs(agg.calories - atwaterSum);
+
+        const targetName = targetRow.dishName || targetRow.ingredient;
+        const adjustedDiag = `Adjusted ${targetName} portion to ${targetWeight}g. Total meal energy is ${agg.calories} kcal with ${agg.protein}g protein and ${agg.fiber}g fiber. Saturated fat remains at ${agg.saturatedFat}g.`;
+
+        const tsv = [
+          columnHeaders.join('\t'),
+          ...updatedRows.map((r: any) => [
+            r.dishName, r.mealId, r.date, r.mealSlot, r.ingredient,
+            r.weightG, r.calories, r.protein, r.totalFat, r.saturatedFat,
+            r.carbs, r.fiber, r.totalSugars, r.sodium, r.potassium,
+            r.calcium, r.iron, r.magnesium, r.phosphorus, r.vitaminA,
+            r.vitaminC, r.vitaminD, r.vitaminE, r.vitaminK, r.vitaminB6,
+            r.vitaminB12, r.folate, r.cholesterol
+          ].join('\t'))
+        ].join('\n');
+
+        return res.json({
+          dishName: existingAnalysis.dishName || targetName,
+          totalDishWeightG: totalWeight,
+          portionWeightG: totalWeight,
+          weightDifferenceDetected: false,
+          weightClarificationPrompt: '',
+          mealDiagnosis: adjustedDiag,
+          dailyDiagnosis: `With adjusted ${targetName} (${targetWeight}g), cumulative day totals reflect ${agg.calories} kcal.`,
+          clinicalSummary: `## Health Benefits\n- **Targeted Portion Scaling:** Scaled ${targetName} to ${targetWeight}g.\n- **Unmodified Ingredients:** Retained exact original portions for all other ingredients.\n\n## Clinical Assessment\n- Total meal calories: ${agg.calories} kcal, Protein: ${agg.protein}g, Fiber: ${agg.fiber}g.\n\n## Dietary Guidance\n- Monitor electrolyte and hydration balance.`,
+          rows: updatedRows,
+          columnHeaders,
+          tsvFormatted: tsv,
+          aggregatedTotals: agg,
+          atwaterEvaluation: {
+            totalWeightG: totalWeight,
+            calories: agg.calories,
+            protein: agg.protein,
+            carbs: agg.carbs,
+            fat: agg.totalFat,
+            atwaterSum,
+            atwaterDiff,
+            caloricDensity: totalWeight > 0 ? Number((agg.calories / totalWeight).toFixed(1)) : 0,
+            withinTolerance: atwaterDiff <= Math.max(30, agg.calories * 0.08),
+          },
+          modelUsed: 'heuristic-targeted-adjustment',
+        });
+      }
+
       // High-fidelity fallback heuristic matching patient's Google Sheet formatting
       const sampleDish = userMessage?.trim() || 'Mixed Fresh Fruit Plate (Banana, Mandarins, Grapes)';
       const mealDiag = 'Fresh whole fruit plate provides high micronutrient density and soluble fiber. Near-zero saturated fat and low sodium support renal clearance and cardiovascular metrics.';
@@ -1728,6 +1851,20 @@ ${resolvedDailyLedger}
 7. ROW-LEVEL DISH NAMES:
    - For the "dishName" inside each individual row, you MUST use the specific name of that item (e.g., "Quaker Instant Oatmeal", "Dry Roasted Peanuts"). DO NOT just copy the top-level combined dishName into every row.
 
+${existingAnalysis && existingAnalysis.rows && existingAnalysis.rows.length > 0 ? `8. MULTI-TURN EXISTING MEAL ADJUSTMENT (STRICT TARGETING MANDATE):
+The user is adjusting an existing meal analysis.
+CURRENT EXISTING BREAKDOWN:
+${JSON.stringify(existingAnalysis.rows, null, 2)}
+
+USER ADJUSTMENT INSTRUCTION: "${userMessage}"
+
+CRITICAL MANDATES FOR ADJUSTING THIS MEAL:
+- If the user specifies an adjustment to a specific ingredient/component (e.g. "set the weight for quaker to 200", "quaker to 200g", "adjust oatmeal to 200g"):
+  1. ONLY update that specific ingredient's row (e.g., Quaker Instant Oatmeal weightG becomes 200).
+  2. Scale that specific ingredient's calories and all 33 nutrients proportionately using ratio: (newWeight / oldWeight).
+  3. ABSOLUTELY DO NOT MODIFY ANY OTHER INGREDIENT ROWS. For example, Dry Roasted Peanuts MUST stay at its EXACT original weight and exact nutrient values. DO NOT redistribute, equalize, or alter untouched ingredients!
+  4. Recalculate aggregatedTotals, Atwater consistency, mealDiagnosis, and dailyDiagnosis based on the sum of the updated row + untouched rows.
+` : ''}
 Context:
 Meal ID: ${mealId}
 Meal Slot: ${mealSlot}
