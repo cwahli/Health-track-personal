@@ -55,6 +55,11 @@ interface MealLogViewProps {
     selectedPhoto: MealPhotoItem,
     newOrderedPhotos: MealPhotoItem[]
   ) => Promise<boolean | void> | boolean | void;
+  onDeleteMealPhoto?: (
+    meal: LoggedMeal,
+    deletedPhoto: MealPhotoItem,
+    newOrderedPhotos: MealPhotoItem[]
+  ) => Promise<boolean | void> | boolean | void;
 }
 
 export const MealLogView: React.FC<MealLogViewProps> = ({
@@ -68,6 +73,7 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   onResetDefaultMeals,
   onUpdateMealPhoto,
   onSetMealTopPhoto,
+  onDeleteMealPhoto,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDayFilter, setSelectedDayFilter] = useState<string>('all');
@@ -902,6 +908,12 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
             activeLightbox.meal && onSetMealTopPhoto
               ? (selectedPhoto, newOrderedPhotos) =>
                   onSetMealTopPhoto(activeLightbox.meal!, selectedPhoto, newOrderedPhotos)
+              : undefined
+          }
+          onDeletePhoto={
+            activeLightbox.meal && onDeleteMealPhoto
+              ? (deletedPhoto, newOrderedPhotos) =>
+                  onDeleteMealPhoto(activeLightbox.meal!, deletedPhoto, newOrderedPhotos)
               : undefined
           }
           onClose={() => setActiveLightbox(null)}

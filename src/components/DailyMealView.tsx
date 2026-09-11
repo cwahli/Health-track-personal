@@ -43,6 +43,11 @@ interface DailyMealViewProps {
     selectedPhoto: MealPhotoItem,
     newOrderedPhotos: MealPhotoItem[]
   ) => Promise<boolean | void> | boolean | void;
+  onDeleteMealPhoto?: (
+    meal: LoggedMeal,
+    deletedPhoto: MealPhotoItem,
+    newOrderedPhotos: MealPhotoItem[]
+  ) => Promise<boolean | void> | boolean | void;
 }
 
 export const DailyMealView: React.FC<DailyMealViewProps> = ({
@@ -55,6 +60,7 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
 
   onUpdateMealPhoto,
   onSetMealTopPhoto,
+  onDeleteMealPhoto,
 }) => {
   const currentDayCol = columns.find(c => c.key === selectedDayKey) || columns[1] || columns[0];
   const dayMeals = meals.filter(m => m.dayKey === selectedDayKey);
@@ -791,6 +797,12 @@ export const DailyMealView: React.FC<DailyMealViewProps> = ({
             activeLightbox.meal && onSetMealTopPhoto
               ? (selectedPhoto, newOrderedPhotos) =>
                   onSetMealTopPhoto(activeLightbox.meal!, selectedPhoto, newOrderedPhotos)
+              : undefined
+          }
+          onDeletePhoto={
+            activeLightbox.meal && onDeleteMealPhoto
+              ? (deletedPhoto, newOrderedPhotos) =>
+                  onDeleteMealPhoto(activeLightbox.meal!, deletedPhoto, newOrderedPhotos)
               : undefined
           }
           onClose={() => setActiveLightbox(null)}

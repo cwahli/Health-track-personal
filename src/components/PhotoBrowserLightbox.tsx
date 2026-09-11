@@ -6,7 +6,8 @@ import {
   X, 
   Images,
   Maximize2,
-  Check
+  Check,
+  Trash2
 } from 'lucide-react';
 import { MealPhotoItem } from '../utils/driveImage';
 
@@ -16,6 +17,7 @@ export interface PhotoBrowserLightboxProps {
   onClose: () => void;
   mealId?: string;
   onSetTopPhoto?: (selectedPhoto: MealPhotoItem, newOrderedPhotos: MealPhotoItem[]) => Promise<boolean | void> | boolean | void;
+  onDeletePhoto?: (deletedPhoto: MealPhotoItem, newOrderedPhotos: MealPhotoItem[]) => Promise<boolean | void> | boolean | void;
 }
 
 export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
@@ -24,6 +26,7 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
   onClose,
   mealId,
   onSetTopPhoto,
+  onDeletePhoto,
 }) => {
   const [orderedPhotos, setOrderedPhotos] = useState<MealPhotoItem[]>(photos);
   const [currentIndex, setCurrentIndex] = useState(() => {
@@ -32,6 +35,7 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
   });
   const [isUpdatingTop, setIsUpdatingTop] = useState(false);
   const [showTopSuccessBadge, setShowTopSuccessBadge] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     setOrderedPhotos(photos);
@@ -76,6 +80,29 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
       console.warn('Failed to update top photo:', e);
     } finally {
       setIsUpdatingTop(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (isDeleting || !onDeletePhoto) return;
+    if (!window.confirm("Are you sure you want to remove this photo?")) return;
+    setIsDeleting(true);
+    try {
+      const selected = orderedPhotos[currentIndex];
+      const newOrder = orderedPhotos.filter((_, idx) => idx !== currentIndex);
+      
+      await onDeletePhoto(selected, newOrder);
+      
+      if (newOrder.length === 0) {
+        onClose();
+      } else {
+        setOrderedPhotos(newOrder);
+        setCurrentIndex((prev) => (prev >= newOrder.length ? newOrder.length - 1 : prev));
+      }
+    } catch (e) {
+      console.warn('Failed to delete photo:', e);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -231,6 +258,23 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
+            )}
+            
+            {/* Delete Button */}
+            {onDeletePhoto && (
+              <button
+                id="lightbox-btn-delete"
+                onClick={handleDelete}
+                disabled={isDeleting}
+                className="p-2 ml-1 text-red-400 hover:text-red-300 hover:bg-red-950/30 border border-transparent hover:border-red-900/50 rounded-lg transition-colors focus:outline-none"
+                title="Delete this photo"
+              >
+                {isDeleting ? (
+                   <span className="w-4 h-4 border-2 border-red-400 border-t-transparent rounded-full animate-spin inline-block"></span>
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
+              </button>
             )}
 
             {/* Google Drive Link */}
