@@ -238,3 +238,22 @@ export interface MealAnalysisResult {
   modelUsed?: string;
 }
 
+export interface MealModalSession {
+  id: string; // unique session id e.g. "session-1726000000"
+  mealId: string; // e.g. "M-028"
+  title: string; // e.g. "Meal M-028" or "Oatmeal Breakfast"
+  dateStr: string; // YYYY-MM-DD
+  mealSlot: 'Breakfast' | 'Lunch' | 'Dinner' | 'Snack' | 'Late Night';
+  initialEditingMeal?: LoggedMeal | null;
+  initialSelectedFiles?: File[] | null;
+  
+  // Dock Preview Card Data
+  status: 'draft' | 'analyzing' | 'ready_to_log' | 'saved';
+  previewImageUrl?: string;
+  previewDishName?: string;
+  previewCalories?: number;
+  previewTimestamp?: string;
+  photoCount?: number;
+  isMinimized: boolean;
+  isOpen: boolean;
+}

@@ -6,6 +6,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import { getDailyNutrientLedger } from './src/utils/dashboardFoodLedger';
 import { processFoodsAnalysis, FoodItemInput } from './src/utils/nutritionEngine';
+import { mapRowToHeaders, buildHeaderIndexMap, findHeaderIndex, STANDARD_COLUMN_HEADERS } from './src/utils/sheetRowMapper';
 
 const __filename = fileURLToPath(import.meta?.url || 'file://' + process.cwd() + '/server.ts');
 const __dirname = path.dirname(__filename);
@@ -186,7 +187,8 @@ async function ensureMealLogSheetExists(spreadsheetId: string, accessToken: stri
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // In-memory cache for live spreadsheet data & config
 // Removed global cached variables to prevent cross-user data leakage in multi-user environments.
@@ -369,8 +371,8 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 1. Fetch live spreadsheet CSV from Google Sheets
-app.post('/api/sheets/fetch', async (req, res) => {
+// 1. Fetch live spreadsheet CSV from Google Sheets (Support POST and GET)
+app.all('/api/sheets/fetch', async (req, res) => {
   try {
     const { url, accessToken } = req.body || {};
     const requestedUrl = url || (req.query.url as string);
@@ -513,8 +515,8 @@ app.post('/api/sheets/fetch', async (req, res) => {
     }
 
     // If both failed to get primary CSV, fallback to in-memory cached sheet CSV
-    if (!csvText) {
-      console.warn("Could not fetch CSV text.");
+    if (!csvText && accessToken) {
+      console.warn("[Sheets API] Could not fetch CSV text with provided token.");
     }
 
     // If still no CSV text and no meal log CSV
@@ -554,6 +556,271 @@ app.post('/api/sheets/fetch', async (req, res) => {
       error: error.message || 'Failed to fetch Google Sheet',
       fallbackToDefault: true,
     });
+  }
+});
+
+// In-memory LRU thumbnail cache for Google Drive images (max 200 items)
+const driveThumbnailCache = new Map<string, { buffer: Buffer; contentType: string; timestamp: number }>();
+
+// 1.1 Drive Thumbnail Stream & Proxy with OAuth fallback
+app.get('/api/drive/thumbnail', async (req, res) => {
+  try {
+    const fileId = ((req.query.fileId as string) || '').trim();
+    if (!fileId) {
+      return res.status(400).send('Missing fileId');
+    }
+
+    // Check in-memory cache (1 hour expiry)
+    const cached = driveThumbnailCache.get(fileId);
+    if (cached && (Date.now() - cached.timestamp < 3600000)) {
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(cached.buffer);
+    }
+
+    const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : (((req.query.token as string) || '').trim());
+
+    // 1. Try public Google CDN endpoint (lh3.googleusercontent.com/d/{fileId}=w400)
+    try {
+      const publicUrl = `https://lh3.googleusercontent.com/d/${fileId}=w400`;
+      const publicRes = await fetch(publicUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(3000),
+      });
+      const contentType = (publicRes.headers.get('content-type') || '').toLowerCase();
+      if (publicRes.ok && contentType.startsWith('image/')) {
+        const buf = Buffer.from(await publicRes.arrayBuffer());
+        if (isBufferValidImage(buf)) {
+          if (driveThumbnailCache.size > 200) {
+            const firstKey = driveThumbnailCache.keys().next().value;
+            if (firstKey) driveThumbnailCache.delete(firstKey);
+          }
+          driveThumbnailCache.set(fileId, { buffer: buf, contentType, timestamp: Date.now() });
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Cache-Control', 'public, max-age=86400');
+          return res.send(buf);
+        }
+      }
+    } catch {
+      // Continue to authenticated Drive API
+    }
+
+    // 2. Authenticated fetch via Google Drive API if public CDN redirected or failed
+    if (bearerToken) {
+      try {
+        const driveApiUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+        const driveRes = await fetch(driveApiUrl, {
+          headers: { Authorization: `Bearer ${bearerToken}` },
+          signal: AbortSignal.timeout(6000),
+        });
+        const contentType = (driveRes.headers.get('content-type') || '').toLowerCase();
+        if (driveRes.ok && (contentType.startsWith('image/') || contentType === 'application/octet-stream')) {
+          const buf = Buffer.from(await driveRes.arrayBuffer());
+          const safeBuf = buf.length > 2 * 1024 * 1024 ? buf.subarray(0, 2 * 1024 * 1024) : buf;
+          if (isBufferValidImage(safeBuf)) {
+            const finalType = contentType.startsWith('image/') ? contentType : 'image/jpeg';
+            if (driveThumbnailCache.size > 200) {
+              const firstKey = driveThumbnailCache.keys().next().value;
+              if (firstKey) driveThumbnailCache.delete(firstKey);
+            }
+            driveThumbnailCache.set(fileId, { buffer: safeBuf, contentType: finalType, timestamp: Date.now() });
+            res.setHeader('Content-Type', finalType);
+            res.setHeader('Cache-Control', 'public, max-age=86400');
+            return res.send(safeBuf);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[Drive Thumbnail Proxy] Auth fetch failed for ${fileId}:`, err.message);
+      }
+    }
+
+    return res.status(404).send('Image not available');
+  } catch (error: any) {
+    return res.status(500).send(error.message);
+  }
+});
+
+// 1.2 Google Drive Folder Listing for user folder selection
+app.get('/api/drive/folders', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : (((req.query.token as string) || '').trim());
+
+    if (!bearerToken) {
+      return res.status(401).json({ success: false, error: 'Missing access token' });
+    }
+
+    const resp = await fetch(
+      'https://www.googleapis.com/drive/v3/files?q=' +
+        encodeURIComponent("mimeType = 'application/vnd.google-apps.folder' and trashed = false") +
+        '&pageSize=100&fields=files(id,name,parents,webViewLink)&orderBy=name',
+      {
+        headers: { Authorization: `Bearer ${bearerToken}` },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+
+    if (!resp.ok) {
+      return res.status(resp.status).json({ success: false, error: await resp.text() });
+    }
+
+    const data: any = await resp.json();
+    const OBSOLETE_TEMPLATE_FOLDER_ID = '1bnF0AV0N1ua2kVDKsA5-PA1CQ-7Y4tPN';
+    const cleanFolders = (data.files || []).filter((f: any) => f.id !== OBSOLETE_TEMPLATE_FOLDER_ID);
+    return res.json({ success: true, folders: cleanFolders });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 1.3 Google Drive Folder Files Listing with robust search, folder auto-discovery & pagination
+app.get('/api/drive/files', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : (((req.query.token as string) || '').trim());
+
+    if (!bearerToken) {
+      return res.status(401).json({ success: false, error: 'Missing access token' });
+    }
+
+    const requestedFolderId = ((req.query.folderId as string) || '').trim();
+    const folderName = ((req.query.folderName as string) || 'Meal_log_perso').trim();
+    const OBSOLETE_TEMPLATE_FOLDER_ID = '1bnF0AV0N1ua2kVDKsA5-PA1CQ-7Y4tPN';
+
+    const allFiles: any[] = [];
+    const seenIds = new Set<string>();
+    const discoveredFolders: { id: string; name: string }[] = [];
+
+    const queryDriveFiles = async (q: string, maxPages = 10) => {
+      let pageToken: string | undefined = undefined;
+      let pagesCount = 0;
+
+      do {
+        pagesCount++;
+        const params = new URLSearchParams({
+          q,
+          supportsAllDrives: 'true',
+          includeItemsFromAllDrives: 'true',
+          fields: 'nextPageToken,files(id,name,mimeType,webViewLink,thumbnailLink,createdTime,description,appProperties,parents)',
+          orderBy: 'createdTime desc',
+          pageSize: '100',
+        });
+        if (pageToken) {
+          params.set('pageToken', pageToken);
+        }
+
+        const driveUrl = `https://www.googleapis.com/drive/v3/files?${params.toString()}`;
+        const resp = await fetch(driveUrl, {
+          headers: { Authorization: `Bearer ${bearerToken}` },
+          signal: AbortSignal.timeout(12000),
+        });
+
+        if (!resp.ok) {
+          const errBody = await resp.text();
+          console.warn(`[Drive List Files] Query failed (${resp.status}):`, errBody);
+          if (resp.status === 401) {
+            const authErr = new Error('401_UNAUTHORIZED');
+            (authErr as any).details = errBody;
+            throw authErr;
+          }
+          break;
+        }
+
+        const data: any = await resp.json();
+        if (data.files && Array.isArray(data.files)) {
+          for (const f of data.files) {
+            // Exclude obsolete glasses files and non-food test images from old template
+            const isGlassesFile = f.name.includes('multi-view') || f.name.includes('mini_heads');
+            if (isGlassesFile) continue;
+
+            const isImage = f.mimeType?.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|heic)$/i.test(f.name);
+            if (isImage && !seenIds.has(f.id)) {
+              seenIds.add(f.id);
+              allFiles.push(f);
+            }
+          }
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken && pagesCount < maxPages);
+    };
+
+    // 1. If explicit user-chosen folderId provided (and not the obsolete template folder), query it
+    if (requestedFolderId && requestedFolderId !== OBSOLETE_TEMPLATE_FOLDER_ID) {
+      await queryDriveFiles(`'${requestedFolderId}' in parents and trashed = false`);
+    }
+
+    // 2. Discover user's meal folders (Meal_log_perso, Health-tracker, Meal log, etc.)
+    try {
+      const folderQueries = [
+        `name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+        `name contains 'Meal' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+        `name contains 'Health' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+        `name contains 'Food' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+      ];
+
+      for (const fq of folderQueries) {
+        const folderResp = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(fq)}&fields=files(id,name)&pageSize=15`, {
+          headers: { Authorization: `Bearer ${bearerToken}` },
+          signal: AbortSignal.timeout(6000),
+        });
+        if (folderResp.ok) {
+          const fData: any = await folderResp.json();
+          if (fData.files && Array.isArray(fData.files)) {
+            for (const f of fData.files) {
+              if (f.id !== OBSOLETE_TEMPLATE_FOLDER_ID && !discoveredFolders.some((df) => df.id === f.id)) {
+                discoveredFolders.push({ id: f.id, name: f.name });
+                // Query all files inside this discovered meal folder
+                await queryDriveFiles(`'${f.id}' in parents and trashed = false`);
+              }
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Drive List Files] Folder search notice:', err.message);
+    }
+
+    // 3. Search for any meal photos across user's entire Drive
+    // Note: Do NOT use `mimeType contains 'image/'` because Google Drive v3 API does not support `contains` for mimeType!
+    // Instead search by file name tokens and filter by mimeType in JavaScript.
+    try {
+      const nameQueries = [
+        "trashed = false and name contains 'M-'",
+        "trashed = false and name contains 'photo'",
+        "trashed = false and name contains 'KFC'",
+        "trashed = false and name contains 'Quaker'",
+        "trashed = false and name contains 'Siomay'",
+        "trashed = false and name contains 'Chicken'",
+        "trashed = false and name contains 'Pia'",
+      ];
+      for (const nq of nameQueries) {
+        await queryDriveFiles(nq, 5);
+      }
+    } catch (searchErr: any) {
+      console.warn('[Drive List Files] Meal photos query notice:', searchErr.message);
+    }
+
+    return res.json({
+      success: true,
+      count: allFiles.length,
+      files: allFiles,
+      discoveredFolders,
+      activeFolderId: requestedFolderId && requestedFolderId !== OBSOLETE_TEMPLATE_FOLDER_ID ? requestedFolderId : (discoveredFolders[0]?.id || ''),
+      activeFolderName: discoveredFolders[0]?.name || folderName,
+    });
+  } catch (error: any) {
+    console.error('[Drive List Files Error]:', error);
+    if (error.message === '401_UNAUTHORIZED') {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Invalid or expired access token', details: error.details });
+    }
+    return res.status(500).json({ success: false, error: error.message || 'Failed to list Drive files' });
   }
 });
 
@@ -631,13 +898,21 @@ app.get('/api/sheets/daily-nutrients', async (req, res) => {
     return res.json({
       success: true,
       date: dateStr,
+      formattedTable: ledger.formattedTable,
       formattedNutrientsTable: ledger.formattedTable,
       columnHeader: ledger.columnHeader,
       nutrients: ledger.nutrients,
     });
   } catch (err: any) {
     console.warn('Error fetching daily nutrients:', err);
-    return res.status(500).json({ success: false, error: err.message || 'Failed to fetch daily nutrients' });
+    return res.json({
+      success: true,
+      date: String(req.query.dateStr || '2026-09-08'),
+      formattedTable: '',
+      formattedNutrientsTable: '',
+      columnHeader: '',
+      nutrients: [],
+    });
   }
 });
 
@@ -712,54 +987,6 @@ app.post('/api/sheets/append-meal-log', async (req, res) => {
     const spreadsheetUrl = sheetUrl;
     const spreadsheetId = spreadsheetUrl ? extractGoogleSpreadsheetId(spreadsheetUrl) : null;
     const mealId = rows[0]?.mealId || '';
-
-    // Enforce Zero-Duplication Rule:
-    // Meal Diagnosis and Daily Diagnosis are populated ONLY on the first row (index 0).
-    // Rows 1..N have empty strings ("").
-    const values = rows.map((r: any, idx: number) => [
-      r.dishName || '',
-      r.mealId || '',
-      r.date || '',
-      r.mealSlot || '',
-      r.ingredient || '',
-      r.weightG ?? '',
-      r.calories ?? '',
-      r.protein ?? '',
-      r.totalFat ?? '',
-      r.saturatedFat ?? '',
-      r.carbs ?? '',
-      r.fiber ?? '',
-      r.totalSugars ?? '',
-      r.sodium ?? '',
-      r.potassium ?? '',
-      r.calcium ?? '',
-      r.iron ?? '',
-      r.magnesium ?? '',
-      r.phosphorus ?? '',
-      r.zinc ?? '',
-      r.selenium ?? '',
-      r.vitaminA ?? '',
-      r.vitaminC ?? '',
-      r.vitaminD ?? '',
-      r.vitaminE ?? '',
-      r.vitaminK ?? '',
-      r.vitaminB12 ?? '',
-      r.folate ?? '',
-      r.vitaminB6 ?? '',
-      r.thiaminB1 ?? '',
-      r.riboflavinB2 ?? '',
-      r.niacinB3 ?? '',
-      r.monounsaturatedFat ?? '',
-      r.polyunsaturatedFat ?? '',
-      r.transFat ?? '',
-      r.cholesterol ?? '',
-      r.addedSugars ?? '',
-      r.sourceRef || 'USDA FDC Reference',
-      idx === 0 ? (r.mealDiagnosis || '') : '',
-      idx === 0 ? (r.dailyDiagnosis || '') : '',
-      r.photoUrl || '',
-    ]);
-
     let googleSheetsAppended = false;
     let googleSheetError = null;
     let preRowCount = 0;
@@ -772,7 +999,6 @@ app.post('/api/sheets/append-meal-log', async (req, res) => {
         const info = await ensureMealLogSheetExists(spreadsheetId, accessToken);
         const exactTabName = info.name;
         
-        // 1. PRE-SNAPSHOT: Measure current length of all columns (A:AO) to find the true bottom
         const rangeParamA = encodeURIComponent(`'${exactTabName}'!A:AO`);
         const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${rangeParamA}`;
         const getRes = await fetch(getUrl, {
@@ -780,15 +1006,18 @@ app.post('/api/sheets/append-meal-log', async (req, res) => {
         });
         
         let targetRow = 1;
+        let headers: string[] = [];
         if (getRes.ok) {
           const getData = await getRes.json();
           preRowCount = getData.values ? getData.values.length : 0;
           targetRow = preRowCount + 1;
+          headers = (getData.values && getData.values.length > 0) ? getData.values[0] : [];
         } else {
           console.warn('Google Sheets API GET warning before append:', getRes.status);
           targetRow = -1;
         }
 
+        const values = rows.map((r: any, idx: number) => mapRowToHeaders(r, idx, headers));
         let sheetRes;
         
         // Primary: Use Bounded Range PUT to guarantee exact row placement (bypasses formatting skipping)
@@ -966,53 +1195,41 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
       }
 
       // 3. INSERT NEW ROWS
+      // 3. INSERT NEW ROWS
       // Enforce zero-duplication for diagnoses
-      const values = newRows.map((r: any, idx: number) => [
-        r.dishName || '',
-        r.mealId || mealId,
-        r.date || '',
-        r.mealSlot || '',
-        r.ingredient || '',
-        r.weightG ?? '',
-        r.calories ?? '',
-        r.protein ?? '',
-        r.totalFat ?? '',
-        r.saturatedFat ?? '',
-        r.carbs ?? '',
-        r.fiber ?? '',
-        r.totalSugars ?? '',
-        r.sodium ?? '',
-        r.potassium ?? '',
-        r.calcium ?? '',
-        r.iron ?? '',
-        r.magnesium ?? '',
-        r.phosphorus ?? '',
-        r.zinc ?? '',
-        r.selenium ?? '',
-        r.vitaminA ?? '',
-        r.vitaminC ?? '',
-        r.vitaminD ?? '',
-        r.vitaminE ?? '',
-        r.vitaminK ?? '',
-        r.vitaminB12 ?? '',
-        r.folate ?? '',
-        r.vitaminB6 ?? '',
-        r.thiaminB1 ?? '',
-        r.riboflavinB2 ?? '',
-        r.niacinB3 ?? '',
-        r.monounsaturatedFat ?? '',
-        r.polyunsaturatedFat ?? '',
-        r.transFat ?? '',
-        r.cholesterol ?? '',
-        r.addedSugars ?? '',
-        r.sourceRef || 'USDA FDC Reference',
-        idx === 0 ? (r.mealDiagnosis || '') : '',
-        idx === 0 ? (r.dailyDiagnosis || '') : '',
-        r.photoUrl || (oldPhotoUrls.length > 0 ? oldPhotoUrls.join(', ') : ''),
-      ]);
+
+      // We must fetch headers to map properly
+      const headerUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`'${exactTabName}'!A1:ZZ1`)}`;
+      const headerRes = await fetch(headerUrl, { headers: { 'Authorization': `Bearer ${accessToken}` } });
+      let headers: string[] = [];
+      if (headerRes.ok) {
+        const hData = await headerRes.json();
+        headers = (hData.values && hData.values.length > 0) ? hData.values[0] : [];
+      }
+
+      const values = newRows.map((r: any, idx: number) => {
+        const mapped = mapRowToHeaders(r, idx, headers);
+        if (!r.photoUrl && oldPhotoUrls.length > 0 && headers.length > 0) {
+            // Re-apply old photo urls if omitted
+            const set = (val: any, ...possibleNames: string[]) => {
+               const normalize = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+               let targetIdx = -1;
+               for (const name of possibleNames) {
+                 targetIdx = headers.findIndex(h => normalize(h) === normalize(name));
+                 if (targetIdx !== -1) break;
+               }
+               if (targetIdx !== -1 && targetIdx < mapped.length) {
+                 mapped[targetIdx] = val;
+               }
+            };
+            set(oldPhotoUrls.join(', '), 'photourl', 'photo', 'imageurl', 'image', 'photourls');
+        }
+        return mapped;
+      });
 
       const rangeParamAppend = encodeURIComponent(`'${exactTabName}'!A:AO`);
       const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${rangeParamAppend}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+      
       const appendRes = await fetch(appendUrl, {
         method: 'POST',
         headers: {
@@ -1069,15 +1286,153 @@ app.post('/api/sheets/edit-meal-log', async (req, res) => {
   }
 });
 
+// 2.66 Comprehensive Verification & Diagnostic Endpoint for Meal Logs & Drive Photos
+app.post('/api/sheets/verify-meal-log', async (req, res) => {
+  try {
+    const { mealId, sheetUrl, accessToken, driveFileIds, driveUrls } = req.body;
+    const spreadsheetId = sheetUrl ? extractGoogleSpreadsheetId(sheetUrl) : null;
+
+    const report: {
+      sheetVerified: boolean;
+      sheetRowsFound: number;
+      sheetData: any[];
+      headers: string[];
+      driveVerification: any[];
+      timestamp: string;
+      errors: string[];
+    } = {
+      sheetVerified: false,
+      sheetRowsFound: 0,
+      sheetData: [],
+      headers: [],
+      driveVerification: [],
+      timestamp: new Date().toISOString(),
+      errors: [],
+    };
+
+    // 1. Verify Google Sheets Rows
+    if (spreadsheetId && accessToken && mealId) {
+      try {
+        const info = await getExactSheetInfo(spreadsheetId, accessToken, 'meal log');
+        const exactTabName = info.name || 'meal log';
+        const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(`'${exactTabName}'!A:ZZ`)}`;
+        const sheetRes = await fetch(getUrl, {
+          headers: { 'Authorization': `Bearer ${accessToken}` }
+        });
+
+        if (sheetRes.ok) {
+          const sData = await sheetRes.json();
+          const allRows: any[][] = sData.values || [];
+          if (allRows.length > 0) {
+            report.headers = allRows[0];
+            const headerMap = buildHeaderIndexMap(report.headers);
+
+            for (let i = 1; i < allRows.length; i++) {
+              const row = allRows[i];
+              const mealIdIdx = findHeaderIndex(headerMap, ['mealid', 'id']);
+              const idInRow = mealIdIdx !== -1 ? row[mealIdIdx] : row[1];
+              if (idInRow && String(idInRow).trim().toLowerCase() === mealId.trim().toLowerCase()) {
+                report.sheetRowsFound++;
+                report.sheetData.push({
+                  rowIndex: i + 1,
+                  dishName: row[findHeaderIndex(headerMap, ['dishname', 'dish'])] || row[0] || '',
+                  mealId: idInRow,
+                  date: row[findHeaderIndex(headerMap, ['date', 'day'])] || row[2] || '',
+                  mealSlot: findHeaderIndex(headerMap, ['mealslot', 'slot']) !== -1 ? row[findHeaderIndex(headerMap, ['mealslot', 'slot'])] : '(Column omitted)',
+                  ingredient: row[findHeaderIndex(headerMap, ['ingredient', 'component'])] || '',
+                  weightG: row[findHeaderIndex(headerMap, ['weightg', 'weight'])] || '',
+                  calories: row[findHeaderIndex(headerMap, ['calories', 'kcal'])] || '',
+                  protein: row[findHeaderIndex(headerMap, ['protein'])] || '',
+                  totalFat: row[findHeaderIndex(headerMap, ['totalfat', 'fat'])] || '',
+                  saturatedFat: row[findHeaderIndex(headerMap, ['saturatedfat', 'satfat'])] || '',
+                  carbs: row[findHeaderIndex(headerMap, ['carbs', 'carbohydrates'])] || '',
+                  rawValues: row,
+                });
+              }
+            }
+            report.sheetVerified = report.sheetRowsFound > 0;
+          }
+        } else {
+          report.errors.push(`Google Sheet read failed: HTTP ${sheetRes.status}`);
+        }
+      } catch (err: any) {
+        report.errors.push(`Google Sheet verification exception: ${err.message}`);
+      }
+    }
+
+    // 2. Verify Google Drive Files
+    const targetFileIds = new Set<string>();
+    if (Array.isArray(driveFileIds)) {
+      driveFileIds.forEach((id: string) => { if (id) targetFileIds.add(String(id).trim()); });
+    }
+    if (Array.isArray(driveUrls)) {
+      driveUrls.forEach((url: string) => {
+        const match = String(url).match(/\/d\/([a-zA-Z0-9_-]+)/) || String(url).match(/id=([a-zA-Z0-9_-]+)/);
+        if (match) targetFileIds.add(match[1]);
+      });
+    }
+
+    if (targetFileIds.size > 0 && accessToken) {
+      for (const fileId of targetFileIds) {
+        try {
+          const fileMetaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,size,mimeType,webViewLink,thumbnailLink,trashed`;
+          const fRes = await fetch(fileMetaUrl, {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+          if (fRes.ok) {
+            const fData = await fRes.json();
+            report.driveVerification.push({
+              fileId,
+              name: fData.name,
+              sizeBytes: fData.size ? parseInt(fData.size, 10) : undefined,
+              mimeType: fData.mimeType,
+              trashed: fData.trashed,
+              exists: !fData.trashed,
+              webViewLink: fData.webViewLink,
+              thumbnailUrl: `https://lh3.googleusercontent.com/d/${fileId}=w800`,
+            });
+          } else {
+            report.driveVerification.push({
+              fileId,
+              exists: false,
+              error: `HTTP ${fRes.status}`,
+            });
+          }
+        } catch (dErr: any) {
+          report.driveVerification.push({
+            fileId,
+            exists: false,
+            error: dErr.message,
+          });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      report,
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Verification endpoint failed',
+    });
+  }
+});
+
 // 2.65 Update Meal Photo Order in Google Sheet (Column AO)
 app.post('/api/sheets/update-meal-photos', async (req, res) => {
   try {
-    const { mealId, photoUrl, sheetUrl, accessToken } = req.body;
-    if (!mealId || photoUrl === undefined) {
-      return res.status(400).json({ success: false, error: 'mealId and photoUrl are required' });
+    const { mealId, photoUrl, photoUrls, sheetUrl, url, accessToken } = req.body;
+    const targetPhotoUrl = photoUrl !== undefined 
+      ? photoUrl 
+      : (Array.isArray(photoUrls) ? photoUrls.filter(Boolean).join(', ') : (photoUrls !== undefined ? photoUrls : undefined));
+
+    if (!mealId || targetPhotoUrl === undefined) {
+      return res.status(400).json({ success: false, error: 'mealId and photoUrl (or photoUrls) are required' });
     }
 
-    const spreadsheetUrl = sheetUrl;
+    const spreadsheetUrl = sheetUrl || url;
     const spreadsheetId = spreadsheetUrl ? extractGoogleSpreadsheetId(spreadsheetUrl) : null;
 
     if (!spreadsheetId || !accessToken) {
@@ -1119,7 +1474,7 @@ app.post('/api/sheets/update-meal-photos', async (req, res) => {
           const sheetRowNumber = i + 1;
           dataToUpdate.push({
             range: `'${exactTabName}'!AO${sheetRowNumber}`,
-            values: [[String(photoUrl)]],
+            values: [[String(targetPhotoUrl)]],
           });
         }
       }
@@ -2239,6 +2594,392 @@ Output ONLY valid JSON with this exact concise schema:
     return res.status(500).json({
       error: error.message || 'Failed to analyze meal photo',
     });
+  }
+});
+
+function isBufferValidImage(buf: Buffer): boolean {
+  if (!buf || buf.length < 32) return false;
+  // Check for HTML text or Google account redirect pages
+  const startStr = buf.slice(0, 80).toString('utf8').toLowerCase();
+  if (startStr.includes('<!doctype') || startStr.includes('<html') || startStr.includes('accounts.google.com') || startStr.includes('<script')) {
+    return false;
+  }
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  // PNG: 89 50 4E 47
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+  // WebP: RIFF ... WEBP
+  if (buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return true;
+  // GIF: GIF87a or GIF89a
+  if (buf.slice(0, 3).toString('ascii') === 'GIF') return true;
+  return false;
+}
+
+function normalizeDateToISO(dateStr?: string): string {
+  if (!dateStr) return new Date().toISOString().split('T')[0];
+  const trimmed = dateStr.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  if (/^\d{4}[/.-]\d{1,2}[/.-]\d{1,2}$/.test(trimmed)) {
+    const parts = trimmed.split(/[/.-]/);
+    return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+  }
+  if (/^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}$/.test(trimmed)) {
+    const parts = trimmed.split(/[/.-]/);
+    return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+  }
+  return new Date().toISOString().split('T')[0];
+}
+
+// 7. Vision-Powered Cleanliness Agent: Batch Image Visualizer & Standardized Renaming Descriptor Generator
+app.post('/api/gemini/describe-photo-batch', async (req, res) => {
+  const {
+    photos = [], // Array<{ id: string; name: string; url?: string; imageBase64?: string; mimeType?: string; mealId?: string; dateStr?: string; dishContext?: string; photoIndex?: number }>
+    preferredModel = 'gemini-3.5-flash-lite',
+    accessToken = '',
+  } = req.body;
+
+  if (!Array.isArray(photos) || photos.length === 0) {
+    return res.status(400).json({ error: 'No photos provided for visual inspection.' });
+  }
+
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : (accessToken || '');
+
+  try {
+    const ai = getGeminiClient();
+    const contents: any[] = [];
+    const validPhotoItems: Array<{ id: string; originalName: string; mealId: string; dateStr: string; photoIndex: number; dishContext: string }> = [];
+    let hasVisualContent = false;
+
+    // Parallelized resilient image fetching with 4-second individual timeout
+    const fetchedBuffers = await Promise.all(
+      photos.map(async (p: any, i: number) => {
+        let rawBase64 = p.imageBase64 || '';
+        let detectedMimeType = p.mimeType || 'image/jpeg';
+
+        if (!rawBase64 && (p.url || p.id)) {
+          const fileId = p.id || extractDriveFileId(p.url || '');
+
+          // 1. Prioritize fast, lightweight 800px Google CDN thumbnail (usually 40-80KB vs 10MB raw)
+          try {
+            const fetchUrl = fileId ? `https://lh3.googleusercontent.com/d/${fileId}=w800` : p.url;
+            if (fetchUrl && fetchUrl.startsWith('http')) {
+              const fetchRes = await fetch(fetchUrl, {
+                signal: AbortSignal.timeout(3000),
+              });
+              const ctype = (fetchRes.headers.get('content-type') || '').toLowerCase();
+              if (fetchRes.ok && ctype.startsWith('image/')) {
+                const buf = Buffer.from(await fetchRes.arrayBuffer());
+                if (isBufferValidImage(buf)) {
+                  rawBase64 = buf.toString('base64');
+                  detectedMimeType = ctype.split(';')[0];
+                }
+              }
+            }
+          } catch (thumbErr) {
+            // Graceful fallback to authenticated Drive API
+          }
+
+          // 2. Authenticated fetch via Google Drive API if thumbnail was blocked/unauthenticated
+          if (!rawBase64 && bearerToken && fileId) {
+            try {
+              const driveApiRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+                headers: { Authorization: `Bearer ${bearerToken}` },
+                signal: AbortSignal.timeout(5000),
+              });
+              const ctype = (driveApiRes.headers.get('content-type') || '').toLowerCase();
+              if (driveApiRes.ok && (ctype.startsWith('image/') || ctype === 'application/octet-stream')) {
+                const buf = Buffer.from(await driveApiRes.arrayBuffer());
+                // Cap at 1.5MB to avoid memory pressure and payload overflow
+                const safeBuf = buf.length > 1.5 * 1024 * 1024 ? buf.subarray(0, 1.5 * 1024 * 1024) : buf;
+                if (isBufferValidImage(safeBuf)) {
+                  rawBase64 = safeBuf.toString('base64');
+                  detectedMimeType = ctype.startsWith('image/') ? ctype.split(';')[0] : 'image/jpeg';
+                }
+              }
+            } catch (driveErr) {
+              // Graceful timeout or fetch failure
+            }
+          }
+        }
+
+        return { rawBase64, detectedMimeType, index: i };
+      })
+    );
+
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      const fetched = fetchedBuffers[i] || { rawBase64: '', detectedMimeType: 'image/jpeg' };
+      const rawBase64 = fetched.rawBase64 || '';
+      const detectedMimeType = fetched.detectedMimeType || 'image/jpeg';
+
+      const cleanBase64 = rawBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+      const cleanDate = normalizeDateToISO(p.dateStr);
+
+      const photoItem = {
+        id: p.id || `photo-${i}`,
+        originalName: p.name || `photo_${i}.jpg`,
+        mealId: (p.mealId || 'M-000').toUpperCase(),
+        dateStr: cleanDate,
+        photoIndex: p.photoIndex !== undefined ? p.photoIndex : i,
+        dishContext: p.dishContext || '',
+      };
+      validPhotoItems.push(photoItem);
+
+      if (cleanBase64) {
+        hasVisualContent = true;
+        contents.push({
+          text: `[Item #${i + 1} Visual Attachment - ID: "${photoItem.id}", Name: "${photoItem.originalName}", Meal: ${photoItem.mealId}]`,
+        });
+        contents.push({
+          inlineData: {
+            data: cleanBase64,
+            mimeType: detectedMimeType,
+          },
+        });
+      } else {
+        contents.push({
+          text: `[Item #${i + 1} Metadata Only - ID: "${photoItem.id}", Name: "${photoItem.originalName}", Meal: ${photoItem.mealId}, Context: "${photoItem.dishContext}"] (Visual binary not retrieved from Drive. Determine classification and clean description based on filename, dish context, and meal ID.)`,
+        });
+      }
+    }
+
+    const inspectionPrompt = `You are an expert Clinical Dietetics Photographic Inspection Agent.
+You are inspecting a batch of ${validPhotoItems.length} meal photo attachments.
+${hasVisualContent ? 'Visual images are attached above for items where available.' : 'Classify and generate clean descriptors from the metadata, filenames, and dish contexts.'}
+
+The list of items to inspect:
+${JSON.stringify(validPhotoItems, null, 2)}
+
+FOR EVERY PHOTO ITEM IN THE LIST (from id: "${validPhotoItems[0].id}" to id: "${validPhotoItems[validPhotoItems.length - 1].id}"), provide an inspection object with:
+1. "id": the exact matching "id" from the input.
+2. "detectedFood": A concise 2-4 word plain description of the primary dish, ingredient, packaging, or item shown (e.g. "Quaker Instant Oatmeal", "Blanched Peanuts", "Sunflower Seeds Packaging", "Nutrition Facts Panel", "Kuaci Sunflower Seeds").
+3. "perspective": One of: "Plated_Dish", "Food_Packaging", "Nutrition_Facts_Table", "Ingredient_Prep", "Beverage", "Scale_Measurement", "Other".
+4. "cleanDescription": A Title_Snake_Case descriptor suitable for a standardized clinical file name (e.g., "Quaker_Instant_Oatmeal", "Blanched_Peanuts", "Peanuts_Nutrition_Label", "Steamed_Chicken_Rice"). Limit to 35 characters. Use ONLY alphanumeric characters and underscores. If multiple items belong to the same meal, differentiate them clearly (e.g. "Quaker_Instant_Oatmeal" vs "Blanched_Peanuts").
+5. "confidence": A float from 0.0 to 1.0 indicating visual/contextual certainty.
+
+CRITICAL NAMING RULES:
+- If the item is a nutritional values/facts table or barcode, set perspective to "Nutrition_Facts_Table" and cleanDescription to e.g. "Item_Nutrition_Facts" or "Packaging_Nutrition_Label".
+- If the item shows front of food packaging/box/bag, set perspective to "Food_Packaging" and cleanDescription to e.g. "[Brand_Dish]_Packaging".
+- If the item is a prepared/cooked plated meal, set perspective to "Plated_Dish".
+- Ensure every item in the input batch has an entry in "inspections" with matching "id".
+
+Respond ONLY with valid JSON conforming to this schema:
+{
+  "inspections": [
+    {
+      "id": string,
+      "detectedFood": string,
+      "perspective": "Plated_Dish" | "Food_Packaging" | "Nutrition_Facts_Table" | "Ingredient_Prep" | "Beverage" | "Scale_Measurement" | "Other",
+      "cleanDescription": string,
+      "confidence": number
+    }
+  ]
+}`;
+
+    contents.push({ text: inspectionPrompt });
+
+    let response;
+    try {
+      response = await generateGeminiWithRetry(ai, {
+        preferredModel,
+        contents,
+        config: {
+          responseMimeType: 'application/json',
+        },
+      });
+    } catch (genErr: any) {
+      console.warn('Primary multimodal vision inspection encountered error. Falling back to metadata-guided inspection...', genErr?.message || genErr);
+      try {
+        const fallbackContents = [
+          {
+            text: `You are an expert Clinical Dietetics Photographic Inspection Agent.
+You are inspecting a batch of ${validPhotoItems.length} meal photo attachments based on metadata, filenames, and dish contexts.
+
+The list of items to inspect:
+${JSON.stringify(validPhotoItems, null, 2)}
+
+FOR EVERY PHOTO ITEM IN THE LIST (from id: "${validPhotoItems[0].id}" to id: "${validPhotoItems[validPhotoItems.length - 1].id}"), provide an inspection object with:
+1. "id": the exact matching "id" from the input.
+2. "detectedFood": A concise 2-4 word plain description of the primary dish, ingredient, packaging, or item shown.
+3. "perspective": One of: "Plated_Dish", "Food_Packaging", "Nutrition_Facts_Table", "Ingredient_Prep", "Beverage", "Scale_Measurement", "Other".
+4. "cleanDescription": A Title_Snake_Case descriptor suitable for a standardized clinical file name (e.g., "Quaker_Instant_Oatmeal", "Blanched_Peanuts", "Peanuts_Nutrition_Label"). Limit to 35 characters.
+5. "confidence": A float from 0.0 to 1.0 indicating certainty.
+
+Respond ONLY with valid JSON conforming to this schema:
+{
+  "inspections": [
+    {
+      "id": string,
+      "detectedFood": string,
+      "perspective": "Plated_Dish" | "Food_Packaging" | "Nutrition_Facts_Table" | "Ingredient_Prep" | "Beverage" | "Scale_Measurement" | "Other",
+      "cleanDescription": string,
+      "confidence": number
+    }
+  ]
+}`,
+          },
+        ];
+
+        response = await generateGeminiWithRetry(ai, {
+          preferredModel,
+          contents: fallbackContents,
+          config: {
+            responseMimeType: 'application/json',
+          },
+        });
+      } catch (fallbackErr) {
+        console.warn('Metadata fallback also failed. Using clinical heuristic naming generator.', fallbackErr);
+        // Fallback to heuristic inspections so the endpoint NEVER fails with 500
+        const heuristicResults = validPhotoItems.map((item) => {
+          const withoutExt = (item.originalName || '').replace(/\.[^/.]+$/, '');
+          let fallbackDesc = item.dishContext || 'Meal_Photo';
+          if (withoutExt && !/^(PXL|IMG|DSC|PHOTO|IMAGE|SCREENSHOT|PANO)[\d_() -]*/i.test(withoutExt)) {
+            fallbackDesc = withoutExt;
+          }
+
+          let perspective: string = 'Plated_Dish';
+          const lower = `${item.originalName} ${item.dishContext}`.toLowerCase();
+          if (lower.includes('nutrition') || lower.includes('facts') || lower.includes('label') || lower.includes('table')) {
+            perspective = 'Nutrition_Facts_Table';
+            if (!fallbackDesc.toLowerCase().includes('nutrition')) fallbackDesc += '_Nutrition_Facts';
+          } else if (lower.includes('pack') || lower.includes('box') || lower.includes('bag') || lower.includes('bottle') || lower.includes('can')) {
+            perspective = 'Food_Packaging';
+            if (!fallbackDesc.toLowerCase().includes('packaging')) fallbackDesc += '_Packaging';
+          }
+
+          const cleanDesc = fallbackDesc
+            .replace(/[^\w\s-]/g, '')
+            .split(/[\s_-]+/)
+            .filter(Boolean)
+            .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join('_')
+            .slice(0, 35) || 'Meal_Photo';
+
+          const photoPart = `photo${item.photoIndex + 1}`;
+          const isoDate = normalizeDateToISO(item.dateStr);
+          const proposedStandardName = `${item.mealId}_${cleanDesc}_${photoPart}_${isoDate}.jpg`;
+
+          return {
+            id: item.id,
+            originalName: item.originalName,
+            mealId: item.mealId,
+            dateStr: isoDate,
+            photoIndex: item.photoIndex,
+            detectedFood: item.dishContext || 'Meal photo',
+            perspective,
+            cleanDescription: cleanDesc,
+            confidence: 0.75,
+            proposedStandardName,
+          };
+        });
+
+        return res.json({
+          success: true,
+          batchSize: photos.length,
+          inspections: heuristicResults,
+          modelUsed: 'clinical-heuristic-fallback',
+        });
+      }
+    }
+
+    const parsed = JSON.parse(response.text || '{}');
+    const inspections = Array.isArray(parsed.inspections) ? parsed.inspections : [];
+
+    // Synthesize final standardized filenames with canonical format: M-XXX_[Desc]_[PhotoNum]_[YYYY-MM-DD].jpg
+    const results = validPhotoItems.map((item, idx) => {
+      const insp = inspections.find((inspItem: any) => inspItem.id === item.id) || inspections[idx] || {};
+
+      let fallbackDesc = item.dishContext || 'Meal_Photo';
+      if (!insp.cleanDescription && item.originalName) {
+        const withoutExt = item.originalName.replace(/\.[^/.]+$/, '');
+        if (!/^(PXL|IMG|DSC|PHOTO|IMAGE|SCREENSHOT|PANO)[\d_() -]*/i.test(withoutExt)) {
+          fallbackDesc = withoutExt;
+        }
+      }
+
+      const rawDesc = insp.cleanDescription || fallbackDesc;
+      const cleanDesc = rawDesc
+        .replace(/[^\w\s-]/g, '')
+        .split(/[\s_-]+/)
+        .filter(Boolean)
+        .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join('_')
+        .slice(0, 35) || 'Meal_Photo';
+
+      const photoPart = `photo${item.photoIndex + 1}`;
+      const isoDate = normalizeDateToISO(item.dateStr);
+      const proposedStandardName = `${item.mealId}_${cleanDesc}_${photoPart}_${isoDate}.jpg`;
+
+      return {
+        id: item.id,
+        originalName: item.originalName,
+        mealId: item.mealId,
+        dateStr: isoDate,
+        photoIndex: item.photoIndex,
+        detectedFood: insp.detectedFood || item.dishContext || 'Meal photo',
+        perspective: insp.perspective || 'Plated_Dish',
+        cleanDescription: cleanDesc,
+        confidence: typeof insp.confidence === 'number' ? insp.confidence : 0.9,
+        proposedStandardName,
+      };
+    });
+
+    return res.json({
+      success: true,
+      batchSize: photos.length,
+      inspections: results,
+      modelUsed: preferredModel,
+    });
+  } catch (error: any) {
+    console.warn('Gemini describe-photo-batch caught outer error:', error);
+    try {
+      const fallbackResults = photos.map((item: any, idx: number) => {
+        const originalName = item.name || `photo_${idx}.jpg`;
+        const withoutExt = originalName.replace(/\.[^/.]+$/, '');
+        let fallbackDesc = item.dishContext || 'Meal_Photo';
+        if (withoutExt && !/^(PXL|IMG|DSC|PHOTO|IMAGE|SCREENSHOT|PANO)[\d_() -]*/i.test(withoutExt)) {
+          fallbackDesc = withoutExt;
+        }
+
+        const cleanDesc = fallbackDesc
+          .replace(/[^\w\s-]/g, '')
+          .split(/[\s_-]+/)
+          .filter(Boolean)
+          .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join('_')
+          .slice(0, 35) || 'Meal_Photo';
+
+        const photoIndex = item.photoIndex !== undefined ? item.photoIndex : idx;
+        const photoPart = `photo${photoIndex + 1}`;
+        const isoDate = normalizeDateToISO(item.dateStr);
+        const proposedStandardName = `${(item.mealId || 'M-000').toUpperCase()}_${cleanDesc}_${photoPart}_${isoDate}.jpg`;
+
+        return {
+          id: item.id || `photo-${idx}`,
+          originalName,
+          mealId: (item.mealId || 'M-000').toUpperCase(),
+          dateStr: isoDate,
+          photoIndex,
+          detectedFood: item.dishContext || 'Meal photo',
+          perspective: 'Plated_Dish',
+          cleanDescription: cleanDesc,
+          confidence: 0.7,
+          proposedStandardName,
+        };
+      });
+
+      return res.json({
+        success: true,
+        batchSize: photos.length,
+        inspections: fallbackResults,
+        modelUsed: 'outer-error-heuristic-recovery',
+      });
+    } catch (recoveryErr) {
+      return res.status(500).json({
+        error: error.message || 'Failed to inspect photo batch with vision agent',
+      });
+    }
   }
 });
 

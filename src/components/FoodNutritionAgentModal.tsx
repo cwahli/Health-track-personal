@@ -37,8 +37,9 @@ import {
   Table,
   Flame,
   Scan,
+  Minus,
 } from 'lucide-react';
-import { LoggedMeal, MealLogRow } from '../types';
+import { LoggedMeal, MealLogRow, MealModalSession } from '../types';
 
 interface NutrientFieldDef {
   key: keyof MealLogRow;
@@ -200,6 +201,13 @@ interface FoodNutritionAgentModalProps {
   initialSelectedFiles?: File[] | null;
   initialEditingMeal?: LoggedMeal | null;
   highestDriveId?: number;
+  sessionId?: string;
+  onMinimize?: () => void;
+  sessions?: MealModalSession[];
+  activeSessionId?: string | null;
+  onSwitchSession?: (sessionId: string) => void;
+  onNewSession?: () => void;
+  onSessionUpdate?: (sessionId: string, update: Partial<MealModalSession>) => void;
 }
 
 export interface StagedPhotoItem {
@@ -228,6 +236,9 @@ interface ChatMessage {
   pendingImageFiles?: File[];
   isSavedToJournal?: boolean;
   savedMealId?: string;
+  isRecoveryGreeting?: boolean;
+  recoveryPhotos?: StagedPhotoItem[];
+  isReviewGreeting?: boolean;
   // Agent review data
   analysis?: {
     dishName: string;
@@ -287,6 +298,13 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
   initialSelectedFiles = null,
   initialEditingMeal = null,
   highestDriveId,
+  sessionId,
+  onMinimize,
+  sessions,
+  activeSessionId,
+  onSwitchSession,
+  onNewSession,
+  onSessionUpdate,
 }) => {
   // Selected model defaults to flash 3.5 lite per user instructions
   const [selectedModel, setSelectedModel] = useState<string>('gemini-3.5-flash-lite');
@@ -367,25 +385,34 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           });
         }
 
+        const cleanFoodName = (initialEditingMeal.foodName || 'Meal').replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_') || 'Meal';
+        const mealDate = initialEditingMeal.dateStr || new Date().toISOString().split('T')[0];
+
         const originalStaged: StagedPhotoItem[] = rawUrls.map((url, idx) => {
           const formatted = formatDriveImageUrl(url, initialEditingMeal.mealId) || url;
           return {
             id: `original-photo-${idx}-${Date.now()}`,
-            file: new File([], `meal_${initialEditingMeal.mealId}_photo_${idx + 1}.jpg`, { type: 'image/jpeg' }),
+            file: new File([], `${initialEditingMeal.mealId}_${cleanFoodName}_photo${idx + 1}_${mealDate}.jpg`, { type: 'image/jpeg' }),
             previewUrl: formatted,
             compressedSizeFormatted: 'Original Photo',
             isExistingDrivePhoto: true,
             existingPhotoUrl: formatted,
           };
         });
+
+        // Pre-stage all original photos so they are active and immediately ready for analysis
+        setStagedPhotos(originalStaged);
+
         if (initialEditingMeal.isRecoveredNewMeal) {
           setMessages([
             {
               id: `recovery-greeting-${Date.now()}`,
               sender: "agent",
               timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-              text: `📸 **Pending Recovery Mode**: I see ${originalStaged.length} photo(s) for **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) that are missing from the spreadsheet.\n\nPlease type **"analyze"** (or provide additional context like *"I added extra cheese"*) to generate the missing nutrition data and add the rows to your spreadsheet.`,
+              text: `📸 **Pending Recovery Mode**: Found ${originalStaged.length} photo(s) for **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) in your Google Drive that are missing from the spreadsheet.\n\nClick **"⚡ Run Nutrition Analysis"** below to analyze the food and generate all 38 Google Sheet nutrient columns.`,
               imageUrls: originalStaged.map((p) => p.previewUrl),
+              isRecoveryGreeting: true,
+              recoveryPhotos: originalStaged,
             },
           ]);
         } else {
@@ -396,6 +423,8 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
               timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
               text: `📝 **Review & Edit Mode**: You are reviewing **${initialEditingMeal.foodName}** (${initialEditingMeal.mealId}) logged on **${initialEditingMeal.dateStr || "today"}**.\n\nAll original photos are attached (${originalStaged.length} photo${originalStaged.length === 1 ? "" : "s"}). Type your edit instructions below (e.g. *“Change portion to 150g”*, *“Adjust sodium to 65mg from label”*, or *“Recalculate with unsweetened oat milk”*) and send to re-evaluate.\n\n*Note: Saving updates the existing Google Sheet cells in-place without creating duplicate Drive photos.*`,
               imageUrls: originalStaged.map((p) => p.previewUrl),
+              isReviewGreeting: true,
+              recoveryPhotos: originalStaged,
             },
           ]);
         }
@@ -488,6 +517,52 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     }
   }, [photoDateStr, defaultDateStr]);
 
+  // Synchronize session preview info with parent dock in real time
+  useEffect(() => {
+    if (sessionId && onSessionUpdate) {
+      const latestMsgWithAnalysis = [...messages].reverse().find((m) => m.analysis);
+      const firstPhoto =
+        stagedPhotos[0]?.previewUrl ||
+        latestMsgWithAnalysis?.imageUrl ||
+        (latestMsgWithAnalysis?.imageUrls && latestMsgWithAnalysis.imageUrls[0]);
+
+      let status: MealModalSession['status'] = 'draft';
+      if (isAnalyzing) {
+        status = 'analyzing';
+      } else if (latestMsgWithAnalysis?.isSavedToJournal) {
+        status = 'saved';
+      } else if (latestMsgWithAnalysis) {
+        status = 'ready_to_log';
+      }
+
+      onSessionUpdate(sessionId, {
+        mealId: activeMealId,
+        title: activeMealId ? `Meal ${activeMealId}` : 'New Meal',
+        dateStr: photoDateStr || defaultDateStr,
+        mealSlot: defaultMealSlot,
+        status,
+        previewImageUrl: firstPhoto || undefined,
+        previewDishName:
+          latestMsgWithAnalysis?.analysis?.dishName ||
+          (stagedPhotos.length > 0
+            ? `${stagedPhotos.length} Photo${stagedPhotos.length > 1 ? 's' : ''}`
+            : undefined),
+        previewCalories: latestMsgWithAnalysis?.analysis?.aggregatedTotals?.calories,
+        photoCount: stagedPhotos.length,
+      });
+    }
+  }, [
+    sessionId,
+    activeMealId,
+    photoDateStr,
+    defaultDateStr,
+    defaultMealSlot,
+    isAnalyzing,
+    messages,
+    stagedPhotos,
+    onSessionUpdate,
+  ]);
+
   // Handle initial selected files if provided
   useEffect(() => {
     if (initialSelectedFiles && initialSelectedFiles.length > 0) {
@@ -553,15 +628,29 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
     }, 3000);
   };
 
-  const handleSendMessage = async () => {
-    if (!inputText.trim() && stagedPhotos.length === 0) return;
+  const handleSendMessage = async (overridePhotosOrEvent?: any, overrideText?: string) => {
+    const isPhotosArray = Array.isArray(overridePhotosOrEvent);
+    const isOverrideText = typeof overrideText === 'string';
+    const currentStaged: StagedPhotoItem[] = isPhotosArray ? overridePhotosOrEvent : (Array.isArray(stagedPhotos) ? [...stagedPhotos] : []);
+    
+    let userText = '';
+    if (isOverrideText) {
+      userText = overrideText.trim();
+    } else if (typeof overridePhotosOrEvent === 'string') {
+      userText = overridePhotosOrEvent.trim();
+    } else {
+      userText = (inputText || '').trim();
+    }
 
-    const userText = inputText.trim();
-    const currentStaged = [...stagedPhotos];
+    if (!userText && currentStaged.length === 0) return;
 
     // Reset input fields immediately but DO NOT revoke preview URLs so chat bubbles can display them
-    setInputText('');
-    handleClearStagedPhotos(false);
+    if (!isOverrideText && typeof overridePhotosOrEvent !== 'string') {
+      setInputText('');
+    }
+    if (!isPhotosArray) {
+      handleClearStagedPhotos(false);
+    }
 
     const userMessageId = `msg-user-${Date.now()}`;
     const previewUrls = currentStaged.map((p) => p.previewUrl);
@@ -709,10 +798,15 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
       try {
         const ledgerRes = await fetch(`/api/sheets/daily-nutrients?dateStr=${encodeURIComponent(extractedDateStr)}`);
         if (ledgerRes.ok) {
-          const ledgerData = await ledgerRes.json();
-          if (ledgerData.formattedTable) {
-            dailyLedgerContent = ledgerData.formattedTable;
-            setDailyNutrientLedgerTable(dailyLedgerContent);
+          const rawLedger = await ledgerRes.text();
+          try {
+            const ledgerData = JSON.parse(rawLedger);
+            if (ledgerData.formattedTable || ledgerData.formattedNutrientsTable) {
+              dailyLedgerContent = ledgerData.formattedTable || ledgerData.formattedNutrientsTable;
+              setDailyNutrientLedgerTable(dailyLedgerContent);
+            }
+          } catch {
+            // benign fallback
           }
         }
       } catch (e) {
@@ -736,7 +830,7 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           mealSlot: initialEditingMeal?.mealType || defaultMealSlot,
           dateStr: extractedDateStr,
           dailyNutrientsContext: dailyLedgerContent,
-          existingAnalysis: lastAgentMsg?.analysis || (initialEditingMeal ? {
+          existingAnalysis: lastAgentMsg?.analysis || (initialEditingMeal && !initialEditingMeal.isRecoveredNewMeal ? {
             dishName: initialEditingMeal.foodName,
             rows: [],
             aggregatedTotals: {
@@ -751,19 +845,27 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
               addedSugars: initialEditingMeal.addedSugars,
             }
           } : undefined),
-          isEditMode: Boolean(initialEditingMeal),
+          isEditMode: Boolean(initialEditingMeal && !initialEditingMeal.isRecoveredNewMeal),
         }),
       });
 
       const latencyMs = Date.now() - startTime;
       tracker.recordNetwork('POST', '/api/gemini/analyze-meal-photo', latencyMs, response.status);
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(errText || 'Failed to analyze meal photo');
+      const rawResText = await response.text();
+      let result: any = {};
+      try {
+        result = JSON.parse(rawResText);
+      } catch {
+        if (!response.ok) {
+          throw new Error(rawResText ? (rawResText.length > 200 ? rawResText.slice(0, 200) + '...' : rawResText) : `Server error (${response.status})`);
+        }
+        throw new Error('Received non-JSON response from server.');
       }
 
-      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || result.message || 'Failed to analyze meal photo');
+      }
 
       let trueRawModelEmission: any = result;
       if (result.rawModelEmission) {
@@ -1677,6 +1779,38 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Multi-Session Switcher Tabs */}
+            {sessions && sessions.length > 1 && (
+              <div className="hidden md:flex items-center gap-1 py-1 px-1.5 bg-slate-950/90 border border-slate-800 rounded-xl max-w-sm overflow-x-auto custom-scrollbar">
+                {sessions.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => onSwitchSession?.(s.id)}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors shrink-0 cursor-pointer ${
+                      s.id === sessionId
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                    }`}
+                    title={s.previewDishName || s.title}
+                  >
+                    <span className="font-bold text-[10px] bg-slate-900/80 px-1 py-0.2 rounded border border-white/10">{s.mealId || 'Meal'}</span>
+                    <span className="truncate max-w-[80px]">{s.previewDishName || s.title}</span>
+                  </button>
+                ))}
+                {onNewSession && (
+                  <button
+                    type="button"
+                    onClick={onNewSession}
+                    className="p-1 bg-slate-900 hover:bg-indigo-600 text-slate-400 hover:text-white rounded-lg transition-colors shrink-0 cursor-pointer"
+                    title="Add another meal session"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Download Debug Report button (replaces button next to close) */}
             <button
               type="button"
@@ -1693,11 +1827,24 @@ export const FoodNutritionAgentModal: React.FC<FoodNutritionAgentModalProps> = (
               <span className="hidden sm:inline">Download Debug Report</span>
             </button>
 
+            {/* Minimize Button */}
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                className="p-1.5 text-slate-400 hover:text-amber-300 rounded-lg hover:bg-slate-800/80 transition-colors cursor-pointer"
+                title="Minimize to dock (keeps chat & photos active)"
+              >
+                <Minus className="w-5 h-5" />
+              </button>
+            )}
+
             {/* Close Button */}
             <button
               type="button"
               onClick={onClose}
               className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/80 transition-colors cursor-pointer"
+              title="Close modal"
             >
               <X className="w-5 h-5" />
             </button>
@@ -2260,9 +2407,28 @@ Google Sheet 38 Column Order:
 
                 {/* Regular text */}
                 {msg.text && (
-                  <p className={msg.sender === 'agent' ? 'text-slate-100 text-sm' : ''}>
+                  <p className={msg.sender === 'agent' ? 'text-slate-100 text-sm whitespace-pre-line' : 'whitespace-pre-line'}>
                     {msg.text}
                   </p>
+                )}
+
+                {/* Pending Recovery Quick Action Button */}
+                {msg.isRecoveryGreeting && !msg.analysis && (
+                  <div className="mt-3 pt-3 border-t border-indigo-500/20 flex flex-wrap items-center gap-3 animate-fade-in">
+                    <button
+                      type="button"
+                      id="btn-run-recovery-analysis"
+                      onClick={() => handleSendMessage(msg.recoveryPhotos || stagedPhotos, `Analyze attached ${(msg.recoveryPhotos || stagedPhotos).length} photo(s) for ${initialEditingMeal?.foodName || 'meal'}`)}
+                      disabled={isAnalyzing}
+                      className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-950/60 flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 active:scale-95"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+                      <span>⚡ Run Nutrition Analysis ({(msg.recoveryPhotos || stagedPhotos).length} Photos)</span>
+                    </button>
+                    <span className="text-[11px] text-slate-400 font-medium">
+                      One-click AI analysis
+                    </span>
+                  </div>
                 )}
 
                 {/* Agent Analysis Result */}
@@ -3104,7 +3270,7 @@ Google Sheet 38 Column Order:
               <div className="flex items-center gap-2">
                 {stagedPhotos.map((photo, pIdx) => (
                   <div
-                    key={photo.id}
+                    key={`${photo.id}-${pIdx}`}
                     className="relative flex items-center gap-2 bg-[#111A2E] border border-slate-700/90 rounded-xl p-1.5 pr-2 shrink-0 shadow-sm"
                   >
                     <img
@@ -3150,6 +3316,19 @@ Google Sheet 38 Column Order:
                   <span className="hidden sm:inline">Clear all</span>
                 </button>
               )}
+
+              {/* Quick Analyze Button directly in photo staging area */}
+              <button
+                type="button"
+                id="btn-staged-quick-analyze"
+                onClick={() => handleSendMessage()}
+                disabled={isAnalyzing}
+                className="ml-auto px-3.5 py-2 h-13 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shrink-0 transition-all shadow-md shadow-indigo-950/60 cursor-pointer active:scale-95"
+                title="Analyze staged photos immediately"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-300 animate-pulse" />
+                <span>Analyze ({stagedPhotos.length})</span>
+              </button>
             </div>
           )}
 

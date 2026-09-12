@@ -34,6 +34,7 @@ import {
   NavigationTab,
   LoggedMeal,
   MealLogRow,
+  MealModalSession,
 } from "./types";
 import { formatDriveImageUrl, MealPhotoItem } from "./utils/driveImage";
 import { getAccessToken, googleSignIn } from "./utils/googleAuth";
@@ -49,6 +50,7 @@ import { SheetConnectionModal } from "./components/SheetConnectionModal";
 import { MealSimulatorModal } from "./components/MealSimulatorModal";
 import { AskNutritionistModal } from "./components/AskNutritionistModal";
 import { FoodNutritionAgentModal } from "./components/FoodNutritionAgentModal";
+import { SheetDriveSanitationModal } from "./components/SheetDriveSanitationModal";
 import { MealLogView } from "./components/MealLogView";
 import { DailyMealView } from "./components/DailyMealView";
 import { SpreadsheetGridView } from "./components/SpreadsheetGridView";
@@ -582,6 +584,8 @@ export default function App() {
       id: uniqueId,
       mealId: googleSheetId || newMealData.mealId || "",
     };
+    
+    console.log("handleAddMeal triggered. Created:", created);
 
     setMeals((prev) => {
       // If a meal with the same mealId and date already exists, update it rather than duplicating
@@ -594,10 +598,12 @@ export default function App() {
           m.id === created.id,
       );
       if (existingIndex !== -1) {
+        console.log("Updating existing meal at index:", existingIndex, prev[existingIndex]);
         const updated = [...prev];
         updated[existingIndex] = { ...created, id: prev[existingIndex].id };
         return updated;
       }
+      console.log("Adding new meal to start of array");
       return [created, ...prev];
     });
 
@@ -776,13 +782,172 @@ export default function App() {
   const [isMealSimulatorOpen, setIsMealSimulatorOpen] =
     useState<boolean>(false);
   const [isAskCoachOpen, setIsAskCoachOpen] = useState<boolean>(false);
-  const [isLogMealOpen, setIsLogMealOpen] = useState<boolean>(false);
-  const [editingMeal, setEditingMeal] = useState<LoggedMeal | null>(null);
+  const [isSanitationModalOpen, setIsSanitationModalOpen] = useState<boolean>(false);
+  
+  // Independent Multi-Session Meal Agent Modals
+  const [mealSessions, setMealSessions] = useState<MealModalSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+
   const [updateNotification, setUpdateNotification] = useState<string | null>(
     null,
   );
 
   const pollTimerRef = useRef<any>(null);
+
+  // Helper to dynamically calculate the next unused Meal ID (e.g. M-028, M-029)
+  const getNextMealIdForSession = useCallback(
+    (existingSessions: MealModalSession[]) => {
+      const usedNumbers: number[] = [];
+
+      mealSheetRows.forEach((r) => {
+        const match = r.mealId?.match(/M-(\d+)/i);
+        if (match) usedNumbers.push(parseInt(match[1], 10));
+      });
+
+      meals.forEach((m) => {
+        const match = m.mealId?.match(/M-(\d+)/i);
+        if (match) usedNumbers.push(parseInt(match[1], 10));
+      });
+
+      existingSessions.forEach((s) => {
+        const match = s.mealId?.match(/M-(\d+)/i);
+        if (match) usedNumbers.push(parseInt(match[1], 10));
+      });
+
+      if (highestDriveId) {
+        usedNumbers.push(highestDriveId);
+      }
+
+      const maxNum = usedNumbers.length > 0 ? Math.max(...usedNumbers) : 27;
+      const nextNum = maxNum + 1;
+      return `M-${String(nextNum).padStart(3, "0")}`;
+    },
+    [mealSheetRows, meals, highestDriveId],
+  );
+
+  // Open / spawn an independent meal session
+  const handleOpenNewMealSession = useCallback(
+    (options?: {
+      initialMeal?: LoggedMeal | null;
+      initialFiles?: File[] | null;
+      mealSlot?: "Breakfast" | "Lunch" | "Dinner" | "Snack" | "Late Night";
+      dateStr?: string;
+    }) => {
+      setMealSessions((prev) => {
+        // If reviewing an existing meal, re-focus if session already exists
+        if (options?.initialMeal?.mealId && !options.initialMeal.isRecoveredNewMeal) {
+          const existing = prev.find(
+            (s) =>
+              s.initialEditingMeal?.mealId?.toUpperCase() ===
+              options.initialMeal?.mealId?.toUpperCase(),
+          );
+          if (existing) {
+            setActiveSessionId(existing.id);
+            return prev.map((s) =>
+              s.id === existing.id
+                ? { ...s, isOpen: true, isMinimized: false }
+                : s,
+            );
+          }
+        }
+
+        const nextMealId =
+          options?.initialMeal?.mealId && !options.initialMeal.isRecoveredNewMeal
+            ? options.initialMeal.mealId
+            : getNextMealIdForSession(prev);
+
+        const newSessionId = `session-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+        const newSession: MealModalSession = {
+          id: newSessionId,
+          mealId: nextMealId,
+          title: options?.initialMeal
+            ? `Review ${options.initialMeal.mealId}`
+            : `Meal ${nextMealId}`,
+          dateStr:
+            options?.dateStr ||
+            options?.initialMeal?.dateStr ||
+            new Date().toISOString().split("T")[0],
+          mealSlot:
+            options?.mealSlot ||
+            (options?.initialMeal?.mealType as any) ||
+            "Breakfast",
+          initialEditingMeal: options?.initialMeal || null,
+          initialSelectedFiles: options?.initialFiles || null,
+          status: options?.initialMeal ? "ready_to_log" : "draft",
+          previewImageUrl:
+            options?.initialMeal?.imageUrl ||
+            options?.initialMeal?.photoUrls?.[0],
+          previewDishName:
+            options?.initialMeal?.foodName ||
+            (options?.initialMeal
+              ? `Review ${options.initialMeal.mealId}`
+              : `New Meal (${nextMealId})`),
+          previewCalories: options?.initialMeal?.calories,
+          photoCount:
+            options?.initialMeal?.photoUrls?.length ||
+            (options?.initialFiles ? options.initialFiles.length : 0),
+          isMinimized: false,
+          isOpen: true,
+        };
+
+        setActiveSessionId(newSessionId);
+        return [...prev, newSession];
+      });
+    },
+    [getNextMealIdForSession],
+  );
+
+  // Close / discard an independent meal session
+  const handleCloseMealSession = useCallback(
+    (sessionId: string) => {
+      setMealSessions((prev) => {
+        const updated = prev.filter((s) => s.id !== sessionId);
+        if (activeSessionId === sessionId) {
+          const nextActive =
+            updated.find((s) => s.isOpen && !s.isMinimized) ||
+            updated[updated.length - 1];
+          setActiveSessionId(nextActive ? nextActive.id : null);
+        }
+        return updated;
+      });
+    },
+    [activeSessionId],
+  );
+
+  // Minimize session to floating dock preview card
+  const handleMinimizeMealSession = useCallback(
+    (sessionId: string) => {
+      setMealSessions((prev) =>
+        prev.map((s) =>
+          s.id === sessionId ? { ...s, isMinimized: true, isOpen: false } : s,
+        ),
+      );
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(null);
+      }
+    },
+    [activeSessionId],
+  );
+
+  // Maximize / switch to a specific meal session
+  const handleMaximizeMealSession = useCallback((sessionId: string) => {
+    setMealSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionId ? { ...s, isMinimized: false, isOpen: true } : s,
+      ),
+    );
+    setActiveSessionId(sessionId);
+  }, []);
+
+  // Update session preview metadata in real time
+  const handleSessionUpdate = useCallback(
+    (sessionId: string, update: Partial<MealModalSession>) => {
+      setMealSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, ...update } : s)),
+      );
+    },
+    [],
+  );
 
   // Fetch data from connected Google Sheet via server proxy
   const fetchLiveData = useCallback(
@@ -809,7 +974,13 @@ export default function App() {
             accessToken: token || undefined,
           }),
         });
-        const data = await res.json();
+        const rawText = await res.text();
+        let data: any = {};
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = { error: rawText ? rawText.slice(0, 100) : "Failed to fetch spreadsheet data" };
+        }
 
         if (!res.ok) {
           if (res.status === 401 && data.isAuthError) {
@@ -830,9 +1001,10 @@ export default function App() {
             }));
           }
 
+          let parsedRows: MealLogRow[] = [];
           if (data.mealLogSyncSuccess || data.mealLogCSV) {
             try {
-              const parsedRows = data.mealLogCSV
+              parsedRows = data.mealLogCSV
                 ? parseMealLogCSV(data.mealLogCSV)
                 : [];
               if (parsedRows.length > 0) {
@@ -1006,10 +1178,17 @@ export default function App() {
                     const num = parseInt(match[1], 10);
                     if (!isNaN(num) && num > maxDriveNum) maxDriveNum = num;
                   }
-                  // Check if this photo's URL, ID, or Filename is bound to ANY row in the sheet
-                  const existsInSheet = rawMealLog.includes(f.id) || rawMealLog.includes(f.name);
+                  // A drive file is considered an orphan ONLY if:
+                  // 1. It is not explicitly linked by URL/ID/Name in the sheet CSV, AND
+                  // 2. Its mealId does NOT exist in the spreadsheet rows.
+                  const boundToSheetContent = rawMealLog.includes(f.id) || rawMealLog.includes(f.name);
+                  const mealRowExistsInSheet = parsedRows.some(
+                    (r) => r.mealId && f.mealId && r.mealId.trim().toUpperCase() === f.mealId.trim().toUpperCase()
+                  );
 
-                  if (!existsInSheet) {
+                  const isOrphan = !boundToSheetContent && !mealRowExistsInSheet;
+
+                  if (isOrphan) {
                     orphans.push(f);
                   }
                 }
@@ -1017,11 +1196,32 @@ export default function App() {
 
               setHighestDriveId(maxDriveNum);
               setOrphanedPhotos(orphans);
-            } catch (e) {
+
+              // Re-check meals to ensure images resolve from the newly populated drive cache
+              setMeals((prevMeals) =>
+                prevMeals.map((meal) => {
+                  if (meal.imageUrl && !meal.imageUrl.includes('data:')) {
+                    return meal;
+                  }
+                  const resolvedImg = formatDriveImageUrl(meal.driveFileName, meal.mealId);
+                  if (resolvedImg && resolvedImg !== meal.imageUrl) {
+                    return { ...meal, imageUrl: resolvedImg };
+                  }
+                  return meal;
+                })
+              );
+            } catch (e: any) {
               console.warn(
                 "Failed to fetch drive files for orphan detection",
                 e,
               );
+              if (e.message === '401_UNAUTHORIZED') {
+                setSheetConfig((prev) => ({
+                  ...prev,
+                  errorMessage: 'Google Drive session expired. Please connect again.',
+                  status: 'error',
+                }));
+              }
             }
           }
 
@@ -1038,7 +1238,9 @@ export default function App() {
           }));
         }
       } catch (err: any) {
-        console.warn("Sheet sync note:", err.message);
+        if (!silent) {
+          console.warn("Sheet sync note:", err.message);
+        }
         setSheetConfig((prev) => ({
           ...prev,
           status: "error",
@@ -1159,10 +1361,11 @@ export default function App() {
             );
             setIsConnectModalOpen(true);
           } else {
-            setIsLogMealOpen(true);
+            handleOpenNewMealSession();
           }
         }}
         onOpenDriveModal={() => setIsDriveModalOpen(true)}
+        onOpenSanitationModal={() => setIsSanitationModalOpen(true)}
         onResyncSheetAttachments={handleResetDefaultMeals}
         onDownloadDebug={handleDownloadDebug}
         onManualRefresh={() => {
@@ -1240,12 +1443,14 @@ export default function App() {
         {activeTab === "meal-log" && (
           <MealLogView
             meals={meals}
+            activeSessions={mealSessions}
+            onOpenSession={(id) => handleMaximizeMealSession(id)}
+            onCloseSession={handleCloseMealSession}
             columns={sheetState.columns}
             onAddMeal={handleAddMeal}
             onDeleteMeal={handleDeleteMeal}
             onReviewMeal={(meal) => {
-              setEditingMeal(meal);
-              setIsLogMealOpen(true);
+              handleOpenNewMealSession({ initialMeal: meal });
             }}
             isDeletingMealId={isDeletingMealId}
 
@@ -1302,8 +1507,7 @@ export default function App() {
                 sodium: 0,
                 addedSugars: 0,
               };
-              setEditingMeal(dummyMeal);
-              setIsLogMealOpen(true);
+              handleOpenNewMealSession({ initialMeal: dummyMeal });
             }}
             onDeleteOrphan={async (photos) => {
               // Optional: delete from drive here
@@ -1512,16 +1716,58 @@ export default function App() {
         diagnosis={activeDiagnosis}
       />
 
-      <FoodNutritionAgentModal
-        isOpen={isLogMealOpen}
-        onClose={() => {
-          setEditingMeal(null);
-          setIsLogMealOpen(false);
-        }}
-        onAddMeal={handleAddMeal}
-        onDeleteMeal={handleDeleteMeal}
-        initialEditingMeal={editingMeal}
-        highestDriveId={highestDriveId}
+      {/* Multi-Session Independent Food Nutrition Agent Modals */}
+      {mealSessions.map((session) => {
+        const isVisible =
+          session.isOpen &&
+          !session.isMinimized &&
+          activeSessionId === session.id;
+
+        return (
+          <div
+            key={session.id}
+            style={{ display: isVisible ? "block" : "none" }}
+          >
+            <FoodNutritionAgentModal
+              isOpen={isVisible}
+              sessionId={session.id}
+              sessions={mealSessions}
+              activeSessionId={activeSessionId}
+              onSwitchSession={handleMaximizeMealSession}
+              onNewSession={() => handleOpenNewMealSession()}
+              onMinimize={() => handleMinimizeMealSession(session.id)}
+              onClose={() => handleCloseMealSession(session.id)}
+              onSessionUpdate={handleSessionUpdate}
+              onAddMeal={(meal, rows) => {
+                handleAddMeal(meal, rows);
+                handleSessionUpdate(session.id, {
+                  status: "saved",
+                  previewDishName: meal.foodName,
+                  previewCalories: meal.calories,
+                });
+              }}
+              onDeleteMeal={handleDeleteMeal}
+              defaultMealId={session.mealId}
+              defaultMealSlot={session.mealSlot}
+              defaultDateStr={session.dateStr}
+              initialSelectedFiles={session.initialSelectedFiles}
+              initialEditingMeal={session.initialEditingMeal}
+              highestDriveId={highestDriveId}
+            />
+          </div>
+        );
+      })}
+
+      {/* Floating Multi-Session Meal Sessions Dock removed since sessions are now cards in the list */}
+
+      {/* Sheet & Drive Cleanliness & Sanitation Agent Modal */}
+      <SheetDriveSanitationModal
+        isOpen={isSanitationModalOpen}
+        onClose={() => setIsSanitationModalOpen(false)}
+        meals={meals}
+        mealSheetRows={mealSheetRows}
+        sheetConfig={sheetConfig}
+        onRefreshData={fetchLiveData}
       />
     </div>
   );

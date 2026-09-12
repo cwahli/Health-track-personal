@@ -18,7 +18,7 @@ import {
   Plus
 } from 'lucide-react';
 import { GOOGLE_DRIVE_PHOTOS, GOOGLE_DRIVE_FOLDER_URL, GOOGLE_DRIVE_FOLDER_ID, DriveFolderFile } from '../data/googleDriveFolderData';
-import { uploadImageToGoogleDrive, fetchGoogleDriveFolderFiles } from '../utils/driveUploader';
+import { uploadImageToGoogleDrive, fetchGoogleDriveFolderFiles, getActiveDriveFolderId, getActiveDriveFolderName } from '../utils/driveUploader';
 import { googleSignIn, googleSignOut, initAuth, getAccessToken } from '../utils/googleAuth';
 import { formatBytes } from '../utils/imageCompressor';
 import { User as FirebaseUser } from 'firebase/auth';
@@ -124,13 +124,22 @@ export const DriveFolderModal: React.FC<DriveFolderModalProps> = ({
       if (liveFiles && liveFiles.length > 0) {
         // Merge with existing avoiding duplicates
         setPhotosList((prev) => {
-          const ids = new Set(liveFiles.map((f) => f.id));
-          const existingRemaining = prev.filter((p) => !ids.has(p.id));
-          return [...liveFiles, ...existingRemaining];
+          const seen = new Set<string>();
+          const deduped: DriveFolderFile[] = [];
+          for (const f of [...liveFiles, ...prev]) {
+            if (!f.id || seen.has(f.id)) continue;
+            seen.add(f.id);
+            deduped.push(f);
+          }
+          return deduped;
         });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Could not refresh drive files:', err);
+      if (err.message === '401_UNAUTHORIZED') {
+        setUploadError('Your Google Drive session expired. Please reconnect.');
+        handleSignOut();
+      }
     }
   };
 
@@ -171,15 +180,15 @@ export const DriveFolderModal: React.FC<DriveFolderModalProps> = ({
     setUploadSuccess(null);
 
     try {
-      const safeMealPart = (customMealName || selectedFile.name.replace(/\.[^/.]+$/, "")).replace(/[^a-zA-Z0-9_-]/g, '_');
       const dateTag = new Date().toISOString().slice(0, 10);
-      const generatedName = `${customMealId || 'Meal'}_${safeMealPart}_${dateTag}.jpg`;
 
       const result = await uploadImageToGoogleDrive(selectedFile, {
-        customFileName: generatedName,
         mealId: customMealId || undefined,
-        dateStr: new Date().toLocaleDateString('en-GB'),
-        description: `Meal photo for ${customMealName || customMealId} uploaded directly to Google Drive`,
+        dishName: customMealName || undefined,
+        dateStr: dateTag,
+        imageIndex: 0,
+        totalImages: 1,
+        description: `Meal photo for ${customMealName || customMealId || 'Meal'} uploaded directly to Google Drive`,
       });
 
       const compNote = result.wasCompressed
@@ -223,8 +232,8 @@ export const DriveFolderModal: React.FC<DriveFolderModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-0 sm:p-6 animate-fade-in">
-      <div className="bg-slate-900 border-0 sm:border border-slate-700/80 rounded-none sm:rounded-2xl max-w-4xl w-full h-full sm:h-auto sm:max-h-[92vh] flex flex-col shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#0B111E] text-slate-100 animate-fade-in w-full h-full overflow-hidden">
+      <div className="w-full h-full flex flex-col overflow-hidden">
         
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/90">
@@ -242,7 +251,10 @@ export const DriveFolderModal: React.FC<DriveFolderModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Folder: <code className="text-blue-300 text-[11px] bg-slate-800 px-1 py-0.5 rounded">{GOOGLE_DRIVE_FOLDER_ID}</code>
+                Folder: <code className="text-blue-300 text-[11px] bg-slate-800 px-1.5 py-0.5 rounded font-semibold">{getActiveDriveFolderName()}</code>
+                {getActiveDriveFolderId() && (
+                  <span className="text-[10px] text-slate-500 ml-1 font-mono">({getActiveDriveFolderId().slice(0, 10)}...)</span>
+                )}
               </p>
             </div>
           </div>
@@ -281,7 +293,7 @@ export const DriveFolderModal: React.FC<DriveFolderModalProps> = ({
             )}
 
             <a
-              href={GOOGLE_DRIVE_FOLDER_URL}
+              href={getActiveDriveFolderId() ? `https://drive.google.com/drive/folders/${getActiveDriveFolderId()}` : GOOGLE_DRIVE_FOLDER_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-semibold border border-slate-700 transition"
@@ -366,13 +378,13 @@ export const DriveFolderModal: React.FC<DriveFolderModalProps> = ({
             {/* Photos Grid */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-5">
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 sm:gap-4">
-                {filteredPhotos.map((photo) => {
+                {filteredPhotos.map((photo, pIdx) => {
                   const isSelected = selectedPhoto?.id === photo.id;
                   const hasError = imageLoadErrors[photo.id];
 
                   return (
                     <div
-                      key={photo.id}
+                      key={`${photo.id}-${photo.name}-${pIdx}`}
                       onClick={() => setSelectedPhoto(photo)}
                       className={`group relative rounded-xl border overflow-hidden cursor-pointer transition-all duration-200 flex flex-col bg-slate-950/70 ${
                         isSelected

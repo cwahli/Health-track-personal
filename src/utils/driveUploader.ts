@@ -1,6 +1,52 @@
 import { GOOGLE_DRIVE_FOLDER_ID, DriveFolderFile } from '../data/googleDriveFolderData';
 import { getAccessToken, clearSavedToken } from './googleAuth';
 import { compressImageToTargetSize, formatBytes } from './imageCompressor';
+import { registerDrivePhoto, runtimeDrivePhotoCache, extractDriveFileId } from './driveImage';
+
+export const OBSOLETE_TEMPLATE_FOLDER_ID = '1bnF0AV0N1ua2kVDKsA5-PA1CQ-7Y4tPN';
+
+/**
+ * Retrieves the user's active Google Drive folder ID from localStorage,
+ * explicitly filtering out the obsolete template folder ID.
+ */
+export function getActiveDriveFolderId(): string {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('nutrihealth_drive_folder_id');
+    if (stored && stored.trim() && stored !== OBSOLETE_TEMPLATE_FOLDER_ID) {
+      return stored.trim();
+    }
+  }
+  return '';
+}
+
+/**
+ * Retrieves the user's active Google Drive folder display name from localStorage.
+ */
+export function getActiveDriveFolderName(): string {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('nutrihealth_drive_folder_name');
+    if (stored && stored.trim()) {
+      return stored.trim();
+    }
+  }
+  return 'Meal_log_perso';
+}
+
+/**
+ * Persists the user's selected Google Drive folder ID/URL and name to localStorage.
+ */
+export function setActiveDriveFolder(idOrUrl: string, name?: string) {
+  if (typeof window !== 'undefined') {
+    const idMatch = idOrUrl.match(/[-\w]{25,}/);
+    const cleanId = idMatch ? idMatch[0] : idOrUrl.trim();
+    if (cleanId && cleanId !== OBSOLETE_TEMPLATE_FOLDER_ID) {
+      localStorage.setItem('nutrihealth_drive_folder_id', cleanId);
+    }
+    if (name && name.trim()) {
+      localStorage.setItem('nutrihealth_drive_folder_name', name.trim());
+    }
+  }
+}
 
 export interface UploadResult {
   fileId: string;
@@ -135,10 +181,115 @@ export async function verifyDriveFilesDeleted(fileIds: string[]): Promise<{ allD
 }
 
 /**
+ * Renames a file in Google Drive in-place via PATCH.
+ * Intelligently resolves synthetic client IDs (e.g. photo-M-032-0) to physical Drive IDs
+ * and safely prevents 404 network errors for spreadsheet-only cell references.
+ */
+export async function renameGoogleDriveFile(fileId: string, newName: string): Promise<boolean> {
+  const token = await getAccessToken();
+  if (!token || !fileId || !newName) return false;
+
+  let actualDriveId = fileId.trim();
+
+  // 1. Resolve Drive ID if it was passed as a URL
+  const extractedId = extractDriveFileId(actualDriveId);
+  if (extractedId) {
+    actualDriveId = extractedId;
+  }
+
+  // 2. Handle synthetic client IDs (e.g. photo-M-032-0 or meal-xxx)
+  if (actualDriveId.startsWith('photo-') || actualDriveId.startsWith('meal-') || actualDriveId.startsWith('temp-')) {
+    // Check runtime cache by ID or newName or oldName
+    const cached = runtimeDrivePhotoCache.get(actualDriveId.toLowerCase()) || 
+                   runtimeDrivePhotoCache.get(newName.toLowerCase());
+    if (cached && cached.id && !cached.id.startsWith('photo-') && !cached.id.startsWith('meal-')) {
+      actualDriveId = cached.id;
+    } else {
+      // Attempt to search Google Drive by meal ID to find the real physical file
+      const mealMatch = actualDriveId.match(/M-\d+/i) || newName.match(/M-\d+/i);
+      if (mealMatch) {
+        try {
+          const searchQ = `name contains '${mealMatch[0]}' and trashed = false`;
+          const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(searchQ)}&fields=files(id,name)&pageSize=10`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (searchRes.ok) {
+            const sData = await searchRes.json();
+            if (sData.files && sData.files.length > 0) {
+              actualDriveId = sData.files[0].id;
+              registerDrivePhoto(actualDriveId, { id: actualDriveId, name: newName, url: `https://lh3.googleusercontent.com/d/${actualDriveId}=w1000`, directViewUrl: `https://drive.google.com/file/d/${actualDriveId}/view` });
+            }
+          }
+        } catch (searchErr) {
+          console.warn('[Drive Rename] Search fallback notice:', searchErr);
+        }
+      }
+    }
+  }
+
+  // 3. If it is still a synthetic ID, it is a spreadsheet-only reference (not a physical file on Drive).
+  // Safely return true without making an invalid PATCH request that would trigger HTTP 404!
+  if (actualDriveId.startsWith('photo-') || actualDriveId.startsWith('meal-') || actualDriveId.startsWith('temp-')) {
+    console.info(`[Google Drive] Skipping Drive PATCH for spreadsheet cell reference "${fileId}". Spreadsheet Column AO and card will update directly.`);
+    return true;
+  }
+
+  try {
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${actualDriveId}?supportsAllDrives=true`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: newName }),
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        console.info(`[Google Drive] File ${actualDriveId} not found on Drive (404). File may be stored as a spreadsheet reference.`);
+        return false;
+      }
+      const errText = await response.text();
+      console.warn(`Failed to rename Google Drive file ${actualDriveId} to ${newName}:`, errText);
+      return false;
+    }
+
+    // Register updated name in cache
+    registerDrivePhoto(actualDriveId, { 
+      id: actualDriveId, 
+      name: newName, 
+      url: `https://lh3.googleusercontent.com/d/${actualDriveId}=w1000`, 
+      directViewUrl: `https://drive.google.com/file/d/${actualDriveId}/view` 
+    });
+    return true;
+  } catch (err) {
+    console.warn(`Error renaming Google Drive file ${actualDriveId}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Normalizes diverse date formats (YYYY-MM-DD, DD/MM/YYYY, YYYY/MM/DD, etc.) strictly to canonical ISO YYYY-MM-DD.
+ */
+export function normalizeDateToISO(dateStr?: string): string {
+  if (!dateStr) return new Date().toISOString().split('T')[0];
+  const trimmed = dateStr.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  if (/^\d{4}[/.-]\d{1,2}[/.-]\d{1,2}$/.test(trimmed)) {
+    const parts = trimmed.split(/[/.-]/);
+    return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+  }
+  if (/^\d{1,2}[/.-]\d{1,2}[/.-]\d{4}$/.test(trimmed)) {
+    const parts = trimmed.split(/[/.-]/);
+    return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+  }
+  return new Date().toISOString().split('T')[0];
+}
+
+/**
  * Formats meal photo file names according to the clinical specification:
- * Format: {MealID}_{CleanDishName}_{YYYY-MM-DD}[_photoX].jpg
- * Example: M-023_Kuaci_Biji_Bunga_Matahari_Package_2026-09-06.jpg
- * Multiple: M-028_Kuaci_Biji_Bunga_Matahari_2026-09-10_photo1.jpg, M-028_Kuaci_Biji_Bunga_Matahari_2026-09-10_photo2.jpg
+ * Format: {MealID}_{PhotoDescription}_{PhotoNumber}_{YYYY-MM-DD}.jpg
+ * Example: M-028_Quaker_Oatmeal_With_Peanuts_photo1_2026-09-11.jpg
  */
 export function formatStandardMealPhotoName(params: {
   mealId?: string;
@@ -150,7 +301,7 @@ export function formatStandardMealPhotoName(params: {
 }): string {
   const mealId = params.mealId ? params.mealId.trim().toUpperCase() : 'M-000';
 
-  // Format clean dish name
+  // Format clean dish description
   let cleanDish = 'Dish';
   if (params.dishName && params.dishName.trim()) {
     cleanDish = params.dishName
@@ -174,25 +325,14 @@ export function formatStandardMealPhotoName(params: {
     }
   }
 
+  // Multi-image index indicated as photo1, photo2, etc.
+  const photoNum = (params.imageIndex !== undefined ? params.imageIndex + 1 : 1);
+  const photoPart = `photo${photoNum}`;
+
   // Format date strictly as YYYY-MM-DD
-  let datePart = params.dateStr;
-  if (!datePart || !/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
-    if (datePart && /^\d{2}\/\d{2}\/\d{4}$/.test(datePart)) {
-      const parts = datePart.split('/');
-      datePart = `${parts[2]}-${parts[1]}-${parts[0]}`;
-    } else {
-      datePart = new Date().toISOString().split('T')[0];
-    }
-  }
+  const datePart = normalizeDateToISO(params.dateStr);
 
-  // Multi-image index indicated strictly at the end before extension
-  const total = params.totalImages ?? (params.imageIndex !== undefined && params.imageIndex > 0 ? 2 : 1);
-  let photoSuffix = '';
-  if (total > 1 && params.imageIndex !== undefined) {
-    photoSuffix = `_photo${params.imageIndex + 1}`;
-  }
-
-  return `${mealId}_${cleanDish}_${datePart}${photoSuffix}.jpg`;
+  return `${mealId}_${cleanDish}_${photoPart}_${datePart}.jpg`;
 }
 
 /**
@@ -222,7 +362,8 @@ export async function uploadImageToGoogleDrive(
     throw new Error('Google Drive authorization token not found. Please click "Connect Google Drive" to sign in first.');
   }
 
-  const targetFolderId = options?.folderId || GOOGLE_DRIVE_FOLDER_ID;
+  const activeFolder = getActiveDriveFolderId();
+  const targetFolderId = options?.folderId || (activeFolder ? activeFolder : GOOGLE_DRIVE_FOLDER_ID);
   const maxBytes = options?.maxSizeBytes ?? (200 * 1024); // 200 KB default target
 
   let fileToUpload: File | Blob = file;
@@ -384,6 +525,24 @@ export async function uploadImageToGoogleDrive(
     dateStr: options?.dateStr || new Date().toLocaleDateString('en-GB'),
   };
 
+  // Register in runtime photo cache for immediate local UI hydration
+  registerDrivePhoto(fileId, {
+    id: fileId,
+    name: finalName,
+    url: thumbnailUrl,
+    directViewUrl: webViewLink,
+    mealId: options?.mealId,
+  });
+  if (options?.mealId) {
+    registerDrivePhoto(options.mealId, {
+      id: fileId,
+      name: finalName,
+      url: thumbnailUrl,
+      directViewUrl: webViewLink,
+      mealId: options.mealId,
+    });
+  }
+
   return {
     fileId,
     fileName: finalName,
@@ -468,35 +627,75 @@ export async function fetchGoogleDriveFolderFiles(folderId?: string): Promise<Dr
   const token = await getAccessToken();
   if (!token) return [];
 
-  const targetFolderId = folderId || GOOGLE_DRIVE_FOLDER_ID;
+  const activeFolderId = folderId || getActiveDriveFolderId();
+  const activeFolderName = getActiveDriveFolderName();
 
   try {
-    const query = `'${targetFolderId}' in parents and trashed = false`;
-    const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,mimeType,webViewLink,thumbnailLink,createdTime,description,appProperties)&orderBy=createdTime+desc&pageSize=100`;
+    let rawFiles: any[] = [];
 
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (!response.ok) {
-      if (response.status === 401) {
-        clearSavedToken();
+    // 1. First attempt: Server-side proxy /api/drive/files (avoids iframe CORS/network blocks & auto-discovers Meal_log_perso)
+    try {
+      const serverProxyUrl = `/api/drive/files?folderId=${encodeURIComponent(activeFolderId)}&folderName=${encodeURIComponent(activeFolderName)}`;
+      const proxyRes = await fetch(serverProxyUrl, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (proxyRes.ok) {
+        const proxyData = await proxyRes.json();
+        if (proxyData.success && Array.isArray(proxyData.files) && proxyData.files.length > 0) {
+          rawFiles = proxyData.files;
+          if (proxyData.activeFolderId && !activeFolderId) {
+            setActiveDriveFolder(proxyData.activeFolderId, proxyData.activeFolderName);
+          }
+        }
+      } else {
+        if (proxyRes.status === 401) {
+          clearSavedToken();
+          throw new Error('401_UNAUTHORIZED');
+        }
       }
-      console.warn('Could not list Google Drive files:', await response.text());
-      return [];
+    } catch (proxyErr: any) {
+      if (proxyErr.message === '401_UNAUTHORIZED') {
+        throw proxyErr; // re-throw to abort and let UI handle it
+      }
+      console.warn('Server drive proxy notice:', proxyErr);
     }
 
-    const data = await response.json();
-    if (!data.files || !Array.isArray(data.files)) return [];
+    // 2. Fallback: Direct Google Drive API if server proxy returned no files
+    if (rawFiles.length === 0 && activeFolderId && activeFolderId !== OBSOLETE_TEMPLATE_FOLDER_ID) {
+      const query = `'${activeFolderId}' in parents and trashed = false`;
+      const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,mimeType,webViewLink,thumbnailLink,createdTime,description,appProperties)&orderBy=createdTime+desc&pageSize=100`;
 
-    return data.files
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          clearSavedToken();
+          throw new Error('401_UNAUTHORIZED');
+        }
+        console.warn('Could not list Google Drive files directly:', await response.text());
+        return [];
+      }
+
+      const data = await response.json();
+      if (data.files && Array.isArray(data.files)) {
+        rawFiles = data.files;
+      }
+    }
+
+    if (!Array.isArray(rawFiles) || rawFiles.length === 0) return [];
+
+    return rawFiles
       .filter((f: any) => f.mimeType?.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|heic)$/i.test(f.name))
       .map((f: any) => {
-        // Parse meal id if present in appProperties or filename like "M-016_..."
+        // Parse meal id if present in appProperties or filename like "meal_M-028_photo_1.jpg" or "M-016_..."
         const appMealId = f.appProperties?.mealId;
-        const mealMatch = f.name.match(/^(M-\d+|KFC-\d+|Obalab-\d+)/i);
+        const mealMatch = f.name.match(/(M-\d+|KFC-\d+|Obalab-\d+)/i);
         const mealId = appMealId || (mealMatch ? mealMatch[1].toUpperCase() : undefined);
         
         // Parse date from createdTime or filename
@@ -510,11 +709,48 @@ export async function fetchGoogleDriveFolderFiles(folderId?: string): Promise<Dr
           dateStr = d.toLocaleDateString('en-GB');
         }
 
+        const directUrl = `https://lh3.googleusercontent.com/d/${f.id}=w1000`;
+        const viewUrl = f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`;
+
+        // Register in runtime cache so any UI query can resolve this photo
+        registerDrivePhoto(f.id, {
+          id: f.id,
+          name: f.name,
+          url: directUrl,
+          directViewUrl: viewUrl,
+          mealId,
+        });
+        registerDrivePhoto(f.name, {
+          id: f.id,
+          name: f.name,
+          url: directUrl,
+          directViewUrl: viewUrl,
+          mealId,
+        });
+        if (f.name.includes('.')) {
+          registerDrivePhoto(f.name.replace(/\.[^/.]+$/, ''), {
+            id: f.id,
+            name: f.name,
+            url: directUrl,
+            directViewUrl: viewUrl,
+            mealId,
+          });
+        }
+        if (mealId) {
+          registerDrivePhoto(mealId, {
+            id: f.id,
+            name: f.name,
+            url: directUrl,
+            directViewUrl: viewUrl,
+            mealId,
+          });
+        }
+
         return {
           id: f.id,
           name: f.name,
-          url: `https://lh3.googleusercontent.com/d/${f.id}=w1000`,
-          directViewUrl: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
+          url: directUrl,
+          directViewUrl: viewUrl,
           mealId,
           dateStr,
         };

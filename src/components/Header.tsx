@@ -18,7 +18,8 @@ import {
   Settings,
   X,
   RotateCcw, Download,
-  User
+  User,
+  ShieldCheck
 } from 'lucide-react';
 import { SheetConfig, NavigationTab } from '../types';
 import { initAuth, googleSignIn, googleSignOut } from '../utils/googleAuth';
@@ -33,6 +34,7 @@ interface HeaderProps {
   onOpenAskCoach: () => void;
   onOpenLogMeal: () => void;
   onOpenDriveModal?: () => void;
+  onOpenSanitationModal?: () => void;
   onResyncSheetAttachments?: () => void;
   onManualRefresh: () => void;
   onDownloadDebug?: () => void;
@@ -49,6 +51,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAskCoach,
   onOpenLogMeal,
   onOpenDriveModal,
+  onOpenSanitationModal,
   onResyncSheetAttachments,
   onManualRefresh,
   onDownloadDebug,
@@ -164,41 +167,43 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
               </button>
 
-              {/* Add Menu (Dropdown for Agents) */}
-              <div className="relative" ref={addMenuRef}>
+              {/* Sanitation & Cleanliness Agent Button */}
+              {onOpenSanitationModal && (
                 <button
-                  onClick={() => setShowAddMenu(!showAddMenu)}
-                  className="flex items-center justify-center p-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition cursor-pointer"
-                  title="Open AI Agents"
+                  onClick={onOpenSanitationModal}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-slate-300 text-xs font-semibold transition-all cursor-pointer"
+                  title="Audit and clean Google Drive & Spreadsheet"
                 >
-                  <Plus className="w-5 h-5" />
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="hidden md:inline">Cleanliness</span>
                 </button>
-                {showAddMenu && (
-                  <div className="absolute right-0 mt-2 w-48 bg-slate-800 border border-slate-700 rounded-xl shadow-xl py-2 z-[99] animate-fade-in">
-                    <button
-                      onClick={() => { setShowAddMenu(false); onOpenLogMeal(); }}
-                      className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200 flex items-center gap-2 cursor-pointer transition-colors"
-                    >
-                      <Camera className="w-4 h-4 text-indigo-400" />
-                      Log Meal
-                    </button>
-                    <button
-                      onClick={() => { setShowAddMenu(false); onOpenMealSimulator(); }}
-                      className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200 flex items-center gap-2 cursor-pointer transition-colors"
-                    >
-                      <Utensils className="w-4 h-4 text-teal-400" />
-                      Simulate Meal
-                    </button>
-                    <button
-                      onClick={() => { setShowAddMenu(false); onOpenAskCoach(); }}
-                      className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200 flex items-center gap-2 cursor-pointer transition-colors"
-                    >
-                      <Sparkles className="w-4 h-4 text-emerald-400" />
-                      AI Coach
-                    </button>
-                  </div>
-                )}
-              </div>
+              )}
+
+              {/* Other AI Agents */}
+              <button
+                onClick={onOpenMealSimulator}
+                className="flex items-center justify-center p-2 rounded-xl bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-teal-400 transition cursor-pointer"
+                title="Simulate Meal"
+              >
+                <Utensils className="w-4 h-4" />
+              </button>
+              <button
+                onClick={onOpenAskCoach}
+                className="flex items-center justify-center p-2 rounded-xl bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-emerald-400 transition cursor-pointer"
+                title="AI Coach"
+              >
+                <Sparkles className="w-4 h-4" />
+              </button>
+
+              {/* Log Meal Button */}
+              <button
+                onClick={onOpenLogMeal}
+                className="flex items-center justify-center p-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition cursor-pointer gap-2"
+                title="Log Meal"
+              >
+                <Camera className="w-4 h-4" />
+                <span className="hidden sm:inline text-sm">Log Meal</span>
+              </button>
             </div>
 
           </div>
@@ -271,9 +276,9 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Settings Modal */}
       {showSettingsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
-          <div className="bg-slate-900 border-0 sm:border border-slate-700 rounded-none sm:rounded-2xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-lg shadow-2xl flex flex-col text-slate-100 overflow-hidden">
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60 shrink-0">
+        <div className="fixed inset-0 z-50 flex flex-col bg-[#0B111E] text-slate-100 animate-fade-in w-full h-full overflow-hidden">
+          <div className="w-full h-full flex flex-col overflow-hidden">
+            <div className="p-4 sm:px-8 sm:py-5 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 shrink-0">
               <h3 className="text-lg font-bold flex items-center gap-2">
                 <Settings className="w-5 h-5 text-emerald-400" />
                 Settings & Integrations
@@ -286,7 +291,8 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             </div>
             
-            <div className="p-6 space-y-6 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8">
+              <div className="max-w-2xl mx-auto space-y-6">
               {/* Google Sheet Connection */}
               <div className="space-y-3">
                 <h4 className="text-sm font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-2">
@@ -464,6 +470,7 @@ export const Header: React.FC<HeaderProps> = ({
                   </div>
                 </div>
               )}
+              </div>
             </div>
           </div>
         </div>

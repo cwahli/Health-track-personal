@@ -84,6 +84,10 @@ export function formatDriveImageUrl(urlOrId?: string, mealId?: string): string |
   if (effectiveUrl) {
     const cached = runtimeDrivePhotoCache.get(effectiveUrl.toLowerCase());
     if (cached) return cached.url;
+    if (effectiveUrl.includes('.')) {
+      const cachedNoExt = runtimeDrivePhotoCache.get(effectiveUrl.replace(/\.[^/.]+$/, '').toLowerCase());
+      if (cachedNoExt) return cachedNoExt.url;
+    }
   }
   if (mealId) {
     const cached = runtimeDrivePhotoCache.get(mealId.toLowerCase());
@@ -114,6 +118,33 @@ export function formatDriveImageUrl(urlOrId?: string, mealId?: string): string |
   }
 
   return null;
+}
+
+export function getDriveThumbnailProxyUrl(fileIdOrUrl?: string, token?: string | null): string {
+  if (!fileIdOrUrl) return '';
+  const trimmed = fileIdOrUrl.trim();
+
+  // 1. Direct drive file ID
+  const directId = extractDriveFileId(trimmed);
+  if (directId) {
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+    return `/api/drive/thumbnail?fileId=${encodeURIComponent(directId)}${tokenParam}`;
+  }
+
+  // 2. Check runtime cache if it's a filename or meal ID
+  const cached = runtimeDrivePhotoCache.get(trimmed.toLowerCase());
+  if (cached && cached.id) {
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+    return `/api/drive/thumbnail?fileId=${encodeURIComponent(cached.id)}${tokenParam}`;
+  }
+
+  // 3. Only if it matches a valid Drive file ID format (raw alphanumeric string)
+  if (/^1[a-zA-Z0-9_-]{27,45}$/.test(trimmed)) {
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+    return `/api/drive/thumbnail?fileId=${encodeURIComponent(trimmed)}${tokenParam}`;
+  }
+
+  return '';
 }
 
 export function getDriveDirectViewUrl(urlOrId?: string, mealId?: string): string {
@@ -233,9 +264,9 @@ export function getMealPhotos(meal: {
     const upperMealId = meal.mealId.trim().toUpperCase();
     for (const [key, item] of runtimeDrivePhotoCache.entries()) {
       const matchesMealId = item.mealId && item.mealId.trim().toUpperCase() === upperMealId;
-      const matchesKeyPrefix = key.toUpperCase().startsWith(upperMealId);
-      const matchesName = item.name && item.name.toUpperCase().startsWith(upperMealId);
-      if (matchesMealId || matchesKeyPrefix || matchesName) {
+      const matchesKey = key.toUpperCase().includes(upperMealId);
+      const matchesName = item.name && item.name.toUpperCase().includes(upperMealId);
+      if (matchesMealId || matchesKey || matchesName) {
         candidates.push({
           ref: item.url,
           knownName: item.name,

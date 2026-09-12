@@ -156,16 +156,14 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
   return (
     <div
       id="photo-browser-lightbox-backdrop"
-      onClick={onClose}
-      className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-3 sm:p-5 cursor-zoom-out select-none"
+      className="fixed inset-0 z-50 flex flex-col bg-[#0B111E] text-slate-100 animate-fade-in w-full h-full overflow-hidden select-none"
     >
       <div
         id="photo-browser-lightbox-container"
-        onClick={(e) => e.stopPropagation()}
-        className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full p-4 sm:p-5 space-y-3.5 shadow-2xl animate-fade-in cursor-default flex flex-col max-h-[92vh]"
+        className="w-full h-full flex flex-col overflow-hidden"
       >
         {/* Header Bar */}
-        <div id="photo-browser-header" className="flex flex-wrap items-center justify-between gap-3 shrink-0">
+        <div id="photo-browser-header" className="px-4 sm:px-8 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 shrink-0">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <h4 className="text-sm sm:text-base font-bold text-white font-heading truncate">
@@ -311,14 +309,14 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
-          className="relative rounded-xl overflow-hidden bg-slate-950 flex items-center justify-center flex-1 min-h-[260px] max-h-[64vh] border border-slate-800/80 group"
+          className="relative overflow-hidden bg-slate-950 flex items-center justify-center flex-1 min-h-0 group"
         >
           <img
             key={currentPhoto.url}
             src={currentPhoto.url}
             alt={currentPhoto.title || `Photo ${currentIndex + 1}`}
             referrerPolicy="no-referrer"
-            className="max-h-[62vh] w-auto max-w-full object-contain rounded-lg transition-opacity duration-200 animate-fade-in"
+            className="max-h-full max-w-full object-contain rounded-lg transition-opacity duration-200 animate-fade-in shadow-2xl p-2"
           />
 
           {/* Floating Left Arrow (Previous) */}
@@ -366,7 +364,7 @@ export const PhotoBrowserLightbox: React.FC<PhotoBrowserLightboxProps> = ({
 
         {/* Thumbnail Carousel Bar (Only if multiple photos) */}
         {totalPhotos > 1 && (
-          <div id="photo-browser-thumbnails" className="pt-1 shrink-0 space-y-1.5">
+          <div id="photo-browser-thumbnails" className="px-4 sm:px-8 py-3 bg-slate-900/90 border-t border-slate-800 shrink-0 space-y-1.5">
             <div className="flex items-center justify-center gap-2 overflow-x-auto pb-1 max-w-full py-0.5">
               {orderedPhotos.map((p, idx) => {
                 const isActive = idx === currentIndex;

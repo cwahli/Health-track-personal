@@ -102,8 +102,10 @@ export const MealSimulatorModal: React.FC<MealSimulatorModalProps> = ({
           </button>
         </div>
 
-        {/* Input Form */}
-        <form onSubmit={handleSimulate} className="space-y-3">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-8">
+          <div className="max-w-4xl mx-auto space-y-6">
+            {/* Input Form */}
+            <form onSubmit={handleSimulate} className="space-y-3">
           <div>
             <label className="block text-xs font-semibold text-slate-300 mb-1.5">
               Describe what you plan to eat:
@@ -233,6 +235,8 @@ export const MealSimulatorModal: React.FC<MealSimulatorModalProps> = ({
           </div>
         )}
 
+          </div>
+        </div>
     </div>
   );
 };

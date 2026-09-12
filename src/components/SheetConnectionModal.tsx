@@ -61,11 +61,11 @@ export const SheetConnectionModal: React.FC<SheetConnectionModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
-      <div className="bg-slate-900 border-0 sm:border border-slate-700 rounded-none sm:rounded-2xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-xl p-6 shadow-2xl flex flex-col text-slate-100 relative">
+    <div className="fixed inset-0 z-50 flex flex-col bg-[#0B111E] text-slate-100 animate-fade-in w-full h-full overflow-hidden">
+      <div className="w-full h-full flex flex-col overflow-hidden">
         
         {/* Modal Header */}
-        <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
+        <div className="px-4 sm:px-8 py-4 border-b border-slate-800 flex items-center justify-between shrink-0 bg-slate-900/90">
           <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
               <Sheet className="w-5 h-5" />
@@ -88,8 +88,9 @@ export const SheetConnectionModal: React.FC<SheetConnectionModalProps> = ({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto space-y-5 py-2">
-        {/* Feedback alert */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-8">
+          <div className="max-w-2xl mx-auto space-y-6">
+            {/* Feedback alert */}
         {feedback && (
           <div className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
             feedback.type === 'success' 
@@ -207,6 +208,7 @@ export const SheetConnectionModal: React.FC<SheetConnectionModalProps> = ({
           </div>
 
         </form>
+          </div>
         </div>
 
       </div>

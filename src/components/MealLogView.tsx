@@ -30,9 +30,10 @@ import {
   Loader2,
   Check,
   FolderOpen,
-  Images
+  MessageSquare,
+  X
 } from 'lucide-react';
-import { LoggedMeal, DayColumn, MealLogRow } from '../types';
+import { LoggedMeal, DayColumn, MealLogRow, MealModalSession } from '../types';
 import { formatDriveImageUrl, isGoogleDriveUrl, getDriveDirectViewUrl, getMealPhotos, MealPhotoItem } from '../utils/driveImage';
 import { formatMealTimeAgo } from '../utils/timeAgo';
 import { DriveFolderModal } from './DriveFolderModal';
@@ -44,6 +45,9 @@ import { formatBytes } from '../utils/imageCompressor';
 
 interface MealLogViewProps {
   meals: LoggedMeal[];
+  activeSessions?: MealModalSession[];
+  onOpenSession?: (id: string) => void;
+  onCloseSession?: (id: string) => void;
   columns: DayColumn[];
   onAddMeal: (meal: Omit<LoggedMeal, 'id'>, sheetRows?: MealLogRow[]) => void;
   onDeleteMeal: (id: string) => void;
@@ -70,6 +74,9 @@ interface MealLogViewProps {
 
 export const MealLogView: React.FC<MealLogViewProps> = ({
   meals,
+  activeSessions = [],
+  onOpenSession,
+  onCloseSession,
   columns,
   onAddMeal,
   onDeleteMeal,
@@ -113,12 +120,15 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
   const orphanGroups = useMemo(() => {
     const groups = new Map<string, { groupKey: string; mealId: string; dishName: string; photos: DriveFolderFile[] }>();
     orphanedPhotos.forEach(photo => {
-      const mealIdMatch = photo.name.match(/^(M-\d+)_/i);
-      const mealId = mealIdMatch ? mealIdMatch[1].toUpperCase() : '';
-      let dishName = photo.name.replace(/^(M-\d+)_/i, '');
+      const mealIdMatch = photo.name.match(/(M-\d+|KFC-\d+|Obalab-\d+)/i);
+      const mealId = photo.mealId || (mealIdMatch ? mealIdMatch[1].toUpperCase() : '');
+      let dishName = photo.name.replace(/^(?:meal_)?(M-\d+|KFC-\d+|Obalab-\d+)[_ -]*/i, '');
       dishName = dishName.replace(/_\d{4}-\d{2}-\d{2}.*$/, '');
       dishName = dishName.replace(/_photo\d+.*$/i, '');
       dishName = dishName.replace(/\.[^/.]+$/, '');
+      if (!dishName || dishName === 'photo') {
+        dishName = mealId ? `Meal ${mealId}` : 'Meal Photo';
+      }
       
       const groupKey = `${mealId}:::${dishName}`;
       if (!groups.has(groupKey)) {
@@ -226,11 +236,13 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
         }
 
         const mealLabel = newMeal.mealId || 'Meal';
-        const cleanFileName = `${mealLabel}_${fileToUpload.name.replace(/\s+/g, '_')}`;
 
         const uploadRes = await uploadImageToGoogleDrive(fileToUpload, {
-          customFileName: cleanFileName,
           mealId: mealLabel,
+          dishName: newMeal.foodName || 'Meal',
+          dateStr: newMeal.dateStr || new Date().toISOString().split('T')[0],
+          imageIndex: 0,
+          totalImages: 1,
           description: `Meal photo for ${mealLabel} (${newMeal.foodName}) uploaded directly into Google Drive Personal food folder`,
           onProgressStatus: (status) => setUploadStatusMsg(status),
         });
@@ -308,12 +320,17 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
 
     try {
       const mealLabel = targetMealId || (isNewMealForm ? newMeal.mealId : 'Meal');
-      const cleanFileName = `${mealLabel}_${file.name.replace(/\s+/g, '_')}`;
+      const matchedMeal = meals.find(m => m.mealId === targetMealId || m.id === targetMealId);
+      const dishName = isNewMealForm ? newMeal.foodName : (matchedMeal?.foodName || 'Meal');
+      const dateStr = isNewMealForm ? newMeal.dateStr : (matchedMeal?.dateStr || new Date().toISOString().split('T')[0]);
 
       setUploadStatusMsg(`Uploading "${file.name}" into Personal Food Drive folder...`);
       const uploadRes = await uploadImageToGoogleDrive(file, {
-        customFileName: cleanFileName,
         mealId: mealLabel,
+        dishName: dishName,
+        dateStr: dateStr,
+        imageIndex: 0,
+        totalImages: 1,
         description: `Uploaded from NutriHealth Tracker for ${mealLabel} into Google Drive folder 1bnF0AV0N1ua2kVDKsA5-PA1CQ-7Y4tPN`,
         onProgressStatus: (status) => setUploadStatusMsg(status),
       });
@@ -441,6 +458,11 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             {orphanGroups.map((group) => {
               const primaryPhoto = group.photos[0];
+              const matchingMeal = meals.find(m => 
+                (group.mealId && m.mealId?.toUpperCase() === group.mealId.toUpperCase()) ||
+                (group.dishName && m.foodName.toLowerCase().replace(/[^a-z0-9]/g, '').includes(group.dishName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8)))
+              );
+
               return (
               <div key={group.groupKey} className="group bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg relative">
                  <div className="h-32 w-full bg-slate-950 relative">
@@ -459,38 +481,48 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                      <p className="text-xs text-slate-300 font-medium truncate" title={group.dishName}>{group.dishName.replace(/_/g, ' ')}</p>
                    </div>
                    
-                   <div className="bg-slate-950 rounded-lg p-2 mb-3 border border-slate-800/50 flex flex-col items-center justify-center py-3">
-                     <FileSpreadsheet className="w-4 h-4 text-slate-600 mb-1" />
-                     <span className="text-[10px] text-slate-500 font-medium">Missing Spreadsheet Row</span>
-                   </div>
+                   {matchingMeal ? (
+                     <div className="bg-emerald-950/40 rounded-lg p-2 mb-3 border border-emerald-800/40 flex flex-col items-center justify-center py-2 text-center">
+                       <div className="flex items-center gap-1 text-emerald-400 text-xs font-semibold">
+                         <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                         <span>In Spreadsheet</span>
+                       </div>
+                       <span className="text-[10px] text-slate-300 font-medium truncate max-w-[200px]" title={matchingMeal.foodName}>
+                         {matchingMeal.foodName} ({matchingMeal.mealId || 'Row'})
+                       </span>
+                     </div>
+                   ) : (
+                     <div className="bg-slate-950 rounded-lg p-2 mb-3 border border-slate-800/50 flex flex-col items-center justify-center py-2">
+                       <FileSpreadsheet className="w-4 h-4 text-slate-500 mb-0.5" />
+                       <span className="text-[10px] text-slate-400 font-medium">Missing Spreadsheet Row</span>
+                     </div>
+                   )}
 
                    <div className="flex items-center gap-2">
+                     {matchingMeal ? (
+                       <button
+                         onClick={() => {
+                           if (onMergeOrphan) {
+                             onMergeOrphan(matchingMeal, group.photos);
+                           }
+                         }}
+                         className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-blue-900/30"
+                         title={`Attach photos to ${matchingMeal.foodName} (${matchingMeal.mealId})`}
+                       >
+                         <Link2 className="w-3.5 h-3.5" /> Link Photo
+                       </button>
+                     ) : null}
                      <button
                        onClick={() => onRecoverOrphan && onRecoverOrphan(group.photos)}
-                       className="flex-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
+                       className={`${matchingMeal ? 'px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300' : 'flex-1 bg-emerald-600 hover:bg-emerald-500 text-white'} py-1.5 rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1 cursor-pointer`}
+                       title="Log or re-analyze as a new meal"
                      >
-                       <Edit3 className="w-3.5 h-3.5" /> Recover as New
-                     </button>
-                     <button
-                       onClick={() => {
-                         const targetMeal = meals.find(m => m.mealId?.toUpperCase() === group.mealId?.toUpperCase() && m.foodName.replace(/[^a-zA-Z]/g, '').toUpperCase().includes(group.dishName.replace(/[^a-zA-Z]/g, '').toUpperCase().split('OATMEAL')[0]));
-                         const fallbackMeal = meals.find(m => m.mealId?.toUpperCase() === group.mealId?.toUpperCase());
-                         const mealToMerge = targetMeal || fallbackMeal;
-
-                         if (mealToMerge && onMergeOrphan) {
-                            onMergeOrphan(mealToMerge, group.photos);
-                         } else {
-                            alert('Could not find existing meal ' + group.mealId + ' in the current sheet to attach this photo to. Please recover as new.');
-                         }
-                       }}
-                       className="flex-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
-                       title={group.mealId ? `Attach to ${group.mealId}` : 'Attach to meal'}
-                     >
-                       <Link2 className="w-3.5 h-3.5" /> Merge
+                       <Edit3 className="w-3.5 h-3.5" /> Recover
                      </button>
                      <button
                        onClick={() => onDeleteOrphan && onDeleteOrphan(group.photos)}
-                       className="px-3 py-1.5 bg-slate-800 hover:bg-rose-900/50 text-slate-300 hover:text-rose-400 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 border border-slate-700 hover:border-rose-900/50"
+                       className="px-2.5 py-1.5 bg-slate-800 hover:bg-rose-900/50 text-slate-300 hover:text-rose-400 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 border border-slate-700 hover:border-rose-900/50 cursor-pointer"
+                       title="Delete photo from Google Drive"
                      >
                        <Trash2 className="w-3.5 h-3.5" />
                      </button>
@@ -570,7 +602,7 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
       </div>
 
       {/* Meals Grid with Drive Attachment Card & Photos */}
-      {filteredMeals.length === 0 ? (
+      {(filteredMeals.length === 0 && activeSessions.filter(s => s.status !== 'saved').length === 0) ? (
         <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-12 text-center space-y-3">
           <Utensils className="w-10 h-10 text-slate-600 mx-auto" />
           <p className="text-sm font-semibold text-slate-300">No meal logs match your current filters</p>
@@ -578,6 +610,75 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Render Active Agent Sessions as Cards */}
+          {activeSessions.filter(s => s.status !== 'saved').map(session => (
+            <div
+              key={session.id}
+              className="bg-indigo-950/40 border border-indigo-500/50 hover:border-indigo-400/80 rounded-2xl p-4 sm:p-5 space-y-4 transition-all shadow-md shadow-indigo-950/40 group relative flex flex-col justify-between cursor-pointer"
+              onClick={() => onOpenSession?.(session.id)}
+            >
+              <div>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-indigo-400" />
+                      <h3 className="text-base font-bold text-white leading-snug">
+                        {session.previewDishName || session.title}
+                      </h3>
+                    </div>
+                    <p className="text-xs text-indigo-300/80">
+                      Active Meal Agent Session • {session.mealSlot}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (confirm('Delete this active session?')) {
+                           onCloseSession?.(session.id);
+                        }
+                      }}
+                      className="p-2 bg-indigo-950/80 hover:bg-rose-900/60 border border-indigo-500/20 hover:border-rose-500/50 text-indigo-400 hover:text-rose-400 rounded-xl transition-all cursor-pointer shadow opacity-0 group-hover:opacity-100 focus:opacity-100"
+                      title="Delete Session"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex gap-4">
+                  {/* Photo Preview Container */}
+                  <div className="w-32 h-32 rounded-xl bg-slate-950 border border-indigo-500/30 overflow-hidden shrink-0 relative group/img shadow-inner flex items-center justify-center">
+                    {session.previewImageUrl ? (
+                      <img src={session.previewImageUrl} alt={session.previewDishName || session.title} className="w-full h-full object-cover opacity-80" />
+                    ) : (
+                      <Utensils className="w-8 h-8 text-indigo-500/40" />
+                    )}
+                    <div className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity">
+                      <span className="text-xs font-bold text-white bg-black/60 px-2 py-1 rounded">Resume</span>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 flex flex-col justify-center gap-3">
+                     <div className="bg-indigo-900/30 rounded-lg p-3 border border-indigo-800/40 flex items-center gap-3">
+                       <div className="w-8 h-8 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+                         <Sparkles className="w-4 h-4" />
+                       </div>
+                       <div>
+                         <p className="text-xs text-indigo-300/90 font-medium leading-tight">Meal Agent is waiting</p>
+                         <p className="text-[10px] text-indigo-400/70 mt-0.5">Click to continue your chat</p>
+                       </div>
+                     </div>
+                     <button className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg flex items-center justify-center gap-2 transition-colors">
+                       <MessageSquare className="w-3.5 h-3.5" />
+                       Continue Chat
+                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+
           {filteredMeals.map((meal, idx) => {
             const mealPhotos = getMealPhotos(meal);
             const hasActualImage = mealPhotos.length > 0;
@@ -781,9 +882,9 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
 
       {/* Attach / Replace Photo Modal */}
       {attachPhotoTarget && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-0 sm:p-4">
-          <div className="bg-slate-900 border-0 sm:border border-slate-800 rounded-none sm:rounded-2xl max-w-md w-full h-full sm:h-auto p-6 space-y-4 shadow-2xl animate-fade-in flex flex-col">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3 shrink-0">
+        <div className="fixed inset-0 z-50 flex flex-col bg-[#0B111E] text-slate-100 animate-fade-in w-full h-full overflow-hidden">
+          <div className="w-full h-full flex flex-col overflow-hidden">
+            <div className="p-4 sm:px-8 sm:py-5 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 shrink-0">
               <div className="flex items-center gap-2">
                 <FileImage className="w-5 h-5 text-emerald-400" />
                 <h3 className="text-base font-bold text-white font-heading">
@@ -796,12 +897,14 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                   setUploadErrorMsg(null);
                   setUploadStatusMsg(null);
                 }}
-                className="text-slate-400 hover:text-white text-sm"
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8">
+              <div className="max-w-xl mx-auto space-y-4 w-full">
             {/* Folder Target Banner */}
             <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-300 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 truncate">
@@ -998,6 +1101,8 @@ export const MealLogView: React.FC<MealLogViewProps> = ({
                 </button>
               </div>
             </form>
+              </div>
+            </div>
           </div>
         </div>
       )}

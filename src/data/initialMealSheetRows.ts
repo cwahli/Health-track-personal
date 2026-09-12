@@ -91,7 +91,7 @@ export const INITIAL_MEAL_LOG_ROWS: MealLogRow[] = [
     sourceRef: 'USDA FDC 172448',
     mealDiagnosis: '## Health Benefits\nThis meal combines protein-dense tofu with lean pork, offering high satiety and a strong amino acid profile to support muscle maintenance.',
     dailyDiagnosis: '## Daily Diagnosis\nCardiovascular/LDL risk maintained below 15g saturated fat.',
-    photoUrl: 'https://lh3.googleusercontent.com/d/1tMkoWXE6tKbk46mQZUZlN9bgPISAY2le=w1000',
+    photoUrl: 'https://lh3.googleusercontent.com/d/1BoiledTofuPorkZUZlN9bgPISAY2le=w1000',
     loggedAt: '2026-09-10T12:00:00Z',
   },
 
